@@ -87,20 +87,36 @@ The trend is the useful part: attributing metal per gate by walking the routing 
 summing the net's metal per layer) cut false positives from ~2400 to ~935 and lifted value
 agreement from 5% to 33%.
 
-### What is still wrong
+### What is still wrong, localised
 
-**Perimeter double-counts at junctions.** Shapes are summed as raw rectangles rather than
-unioned. For *area* that only matters where metal overlaps; for *perimeter* every junction
-between collinear segments contributes two fictitious edges — and on sky130 the only stated
-antenna limit is `DiffPSR`, whose numerator is perimeter × thickness. This is the leading
-suspect for the remaining over-reporting.
+Two independent errors, measured rather than assumed:
+
+**The numerator is too large — always.** Of 109 records both engines produced, not one of ours
+is below 0.9× OpenROAD's. Restricting to the 46 where the *limit* already agrees — isolating the
+numerator — **none** lands within 10%; all are 1.1× to 5×+ high. So metal is still being
+attributed to gates that OpenROAD does not attribute to them.
 
 **Diffusion is applied net-wide, not per stage.** The real limit moves as the path to diffusion
 completes: OpenROAD's own report shows one pin requiring 400.00 on met1 and 3119.36 on met2.
-Applying one net-wide diffusion area to every layer sets the bar wrong in both directions.
+One net-wide diffusion area for every layer sets the bar wrong, and is why ~58% of shared
+records disagree on the limit.
 
 **Cut layers are not checked.** OpenROAD evaluates `mcon`/`via`/`via2` against their own ratios;
 this engine evaluates routing layers only.
+
+#### A hypothesis that measurement rejected
+
+Perimeter double-counting at junctions looked like the leading suspect: shapes were summed as
+raw rectangles, and every join between abutting collinear segments contributes two interior
+edges that no physical wire has — which matters most here because sky130's only antenna limit
+has a perimeter numerator.
+
+Replacing the sum with an exact union changed the result by **one violation** (986 → 985), with
+identical match counts and identical value agreement. The router evidently emits few enough
+abutting fragments that the inflation was negligible on this design. The union is correct and
+stays, but it was not the error, and the residual over-attribution is in **connectivity** rather
+than geometry. Recorded because a plausible, well-argued hypothesis that fails a measurement is
+worth as much as one that passes.
 
 ## Other stated bounds
 
