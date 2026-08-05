@@ -67,20 +67,52 @@ yet `dbTechLayerAntennaRule::isValid()` is false for all of them — that predic
 
 A plain-ratios-only checker sees no limits there at all.
 
-## Stated bounds
+## Maturity — measured, not claimed
 
-Both over-report rather than under-report, so a **clean verdict is trustworthy** and a reported
-violation may be spurious:
+Correlated against OpenROAD `check_antennas` on a routed sky130 block (~2500 nets, the same
+`.odb`, 2026-08-05):
+
+| | |
+| --- | --- |
+| Violating nets OpenROAD found | 73 |
+| …that this engine also found | **61 (84%)** |
+| Violations this engine adds | **~2400** |
+
+**Read that second number before trusting a verdict.** It finds most real violations and reports
+many that are not real. It is useful today as a *screen* — a clean run is weak evidence and a
+flagged net is worth looking at — and it is **not yet a sign-off gate**. Do not gate a tapeout on
+it; run OpenROAD's `check_antennas` for that.
+
+### Why the false positives — the metal-attribution model
+
+The gap is understood, and it is a model gap rather than a bug. At the manufacturing stage where
+layer *L* is deposited, the metal connected to a given gate is the routing sub-graph reachable
+from that gate over layers ≤ *L*. Two gates on one net can sit on different branches and collect
+very different amounts of metal until a higher layer joins them.
+
+This engine sums the net's metal per layer and charges all of it to every gate on the net. So on
+a net whose gates are on separate branches it over-attributes, sometimes by a lot — measured
+against OpenROAD on one net: 5685.6 for every pin, where OpenROAD gives 720.2 for four of them
+and 2786.0 for the fifth.
+
+Closing it needs a walk of the routing graph from each gate pin rather than a per-layer sum.
+Likewise the diffusion area is applied net-wide here, where the real limit varies per layer as
+the path to diffusion completes — visible in OpenROAD's own report as the same pin requiring
+400.00 on met1 and 3119.36 on met2.
+
+## Other stated bounds
 
 1. **Metal area double-counts overlap.** Shapes are summed as raw rectangles, not unioned, so
-   metal that overlaps itself on a layer is counted twice. Over-reports area, hence the ratio.
-2. **Layer order is routing level**, not a manufacturing step model. This is the standard
-   approximation for CAR.
+   metal that overlaps itself on a layer is counted twice — and perimeter, which drives the
+   side-area ratios, suffers worse than area because interior junction edges are counted too.
+2. **Layer order is routing level**, not a manufacturing step model. The standard CAR
+   approximation.
+3. **Cut layers are not checked.** OpenROAD evaluates `mcon`/`via`/`via2`… against their own
+   ratios; this engine evaluates routing layers only.
 
-And one gap that is the technology's, not ours: a ratio the technology states in *neither* form
-is not checked. On sky130 that means PAR, CAR and CSR are unlimited and only PSR is evaluated.
-The report's `layers_without_rules` and `no_rules_found` exist so this is visible rather than
-implied by a passing exit code.
+And one gap that is the technology's rather than the tool's: a ratio stated in *neither* LEF form
+is not checked. On sky130 that means PAR, CAR and CSR are unlimited and only PSR is evaluated —
+which the golden report confirms, every one of its 83 violations being PSR.
 
 ## Verdicts that are not verdicts
 

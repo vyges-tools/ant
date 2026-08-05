@@ -24,15 +24,32 @@
 //! Cumulative matters: a net legal on each layer taken alone can still violate CAR, because the
 //! charge a gate sees is what the whole connected stack collected, not the worst single layer.
 //!
-//! # Stated bounds (v0)
+//! # Maturity — measured against OpenROAD, not claimed
 //!
-//! These are limits of this implementation, not of the check. Each over-reports rather than
-//! under-reports, so a clean verdict stays trustworthy and a violation may be spurious:
+//! Correlated against `check_antennas` on a routed sky130 block (~2500 nets, same `.odb`,
+//! 2026-08-05): **61 of 73 violating nets found (84%), with ~2400 added that OpenROAD does not
+//! confirm.** A screen, not a sign-off gate. Do not gate a tapeout on it.
+//!
+//! # The metal-attribution gap (why the false positives)
+//!
+//! At the stage where layer *L* is deposited, the metal connected to a gate is the routing
+//! sub-graph reachable from that gate over layers ≤ *L*. Two gates on one net can sit on
+//! different branches and collect very different metal until a higher layer joins them.
+//!
+//! This engine sums the net's metal per layer and charges all of it to every gate. Measured on
+//! one net: 5685.6 for every pin where OpenROAD gives 720.2 for four and 2786.0 for the fifth.
+//! Closing it needs a routing-graph walk from each gate pin rather than a per-layer sum. The
+//! diffusion area is likewise applied net-wide, where the real limit moves per layer as the
+//! path to diffusion completes (the same pin requiring 400.00 on met1 and 3119.36 on met2).
+//!
+//! # Other stated bounds
 //!
 //! 1. **Metal area double-counts overlap.** Shapes are summed as raw rectangles, not unioned
-//!    (see `vyges-opendb`'s `net_wire_area_on_layer`). Over-reports area, hence the ratio.
+//!    (see `vyges-opendb`'s `net_wire_area_on_layer`) — perimeter worse than area, since
+//!    interior junction edges count too.
 //! 2. **Layer order is routing level.** Ordering is by `dbTechLayer` routing level rather than
 //!    by a manufacturing step model, which is the standard approximation for CAR.
+//! 3. **Cut layers are not checked** — routing layers only.
 //!
 //! # Two forms of limit, and why both are needed
 //!

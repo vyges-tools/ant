@@ -36,7 +36,11 @@ const DESCRIBE: &str = r#"{
       "input_hash covers the argument vector, not the content of the .odb it names.",
       "Both the plain and the diffusion-dependent (PWL) LEF ratio forms are read; where a technology states a diff curve it takes precedence, and outside the curve's stated range the limit is clamped rather than extrapolated.",
       "A ratio the technology states in neither form is not checked. On sky130 only DiffPSR is stated, so PAR, CAR and CSR are unlimited there; layers_without_rules and no_rules_found report this rather than leaving it implied by the exit code.",
-      "Metal area is a raw rectangle sum, so overlapping shapes on a layer are double-counted; the error over-reports the ratio and never hides a violation.",
+      "NOT A SIGN-OFF GATE YET. Correlated against OpenROAD check_antennas on a routed sky130 block: it found 61 of 73 violating nets (84%) and added ~2400 it does not confirm. Useful as a screen; run check_antennas to gate a tapeout.",
+      "Metal is attributed per layer across the whole net and charged to every gate on it. The real model attributes to each gate only the routing reachable from it over layers at or below the current one, so gates on separate branches are over-charged here — the main source of the false positives above.",
+      "Diffusion area is applied net-wide, where the real limit varies per layer as the path to diffusion completes.",
+      "Cut layers (mcon/via/via2) are not checked; routing layers only.",
+      "Metal area is a raw rectangle sum, so overlapping shapes on a layer are double-counted; perimeter suffers worse than area because interior junction edges are counted too.",
       "Layer accumulation order is dbTechLayer routing level, not a manufacturing step model."
   ],
   "invocation": {
