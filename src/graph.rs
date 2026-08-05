@@ -84,17 +84,35 @@ impl WireGraph {
         self.shapes.is_empty()
     }
 
-    /// Index of the shape covering `(x, y)` on the lowest layer — where a pin meets the metal.
+    /// Index of the shape where a pin meets the metal.
     ///
-    /// Lowest because a pin connects at the bottom of the stack; picking any covering shape
-    /// could anchor to a higher layer that merely passes overhead, which is a different
-    /// conductor entirely until a via joins them.
+    /// Containment first, on the lowest layer that covers the point: a pin connects at the
+    /// bottom of the stack, and a higher layer merely passing overhead is a different
+    /// conductor until a via joins them.
+    ///
+    /// Falling back to the **nearest** shape is not a nicety — it is required. The pin location
+    /// odb reports is the terminal's average point, while the router lands on an access point
+    /// somewhere inside the pin rectangle, so the wire frequently stops short of the centroid.
+    /// Demanding containment left 9831 of ~10000 gates unanchored on a real block, i.e. almost
+    /// every gate silently unchecked. The pin is known to be on this net (it came from the
+    /// net's own terminal list), so the closest piece of the net's metal is the conductor it
+    /// reaches; distance only breaks the tie.
     pub fn anchor(&self, x: i32, y: i32) -> Option<usize> {
-        self.shapes
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| !s.is_via && s.layer >= 0 && s.contains(x, y))
-            .min_by_key(|(_, s)| s.layer)
+        let routing = || {
+            self.shapes.iter().enumerate().filter(|(_, s)| !s.is_via && s.layer >= 0)
+        };
+        if let Some((i, _)) =
+            routing().filter(|(_, s)| s.contains(x, y)).min_by_key(|(_, s)| s.layer)
+        {
+            return Some(i);
+        }
+        // Squared distance from the point to the rectangle (0 inside), then lowest layer.
+        routing()
+            .min_by_key(|(_, s)| {
+                let dx = (s.x0 - x).max(0).max(x - s.x1) as i64;
+                let dy = (s.y0 - y).max(0).max(y - s.y1) as i64;
+                (dx * dx + dy * dy, s.layer)
+            })
             .map(|(i, _)| i)
     }
 
@@ -249,9 +267,30 @@ mod tests {
         assert_eq!(g.shapes[a].layer, 1);
     }
 
+    /// A pin that lands just off the metal still anchors — the router stops at an access
+    /// point inside the pin rectangle, not at the centroid odb reports, so requiring
+    /// containment leaves nearly every real gate unchecked.
     #[test]
-    fn a_pin_over_no_metal_has_no_anchor() {
+    fn a_pin_just_off_the_metal_anchors_to_the_nearest() {
         let g = WireGraph::new(vec![metal(1, 0, 100)]);
-        assert_eq!(g.anchor(500, 500), None);
+        let a = g.anchor(105, 5).expect("just past the end of the wire");
+        assert_eq!(g.shapes[a].layer, 1);
+    }
+
+    /// With nothing routed there is nothing to anchor to.
+    #[test]
+    fn a_net_with_no_routing_has_no_anchor() {
+        let g = WireGraph::new(vec![]);
+        assert_eq!(g.anchor(0, 0), None);
+    }
+
+    /// Nearest wins over lower-layer when the pin is genuinely closer to a higher shape;
+    /// containment still takes precedence when it applies.
+    #[test]
+    fn containment_beats_proximity() {
+        // A layer-3 shape covering the point, and a layer-1 shape far away.
+        let g = WireGraph::new(vec![metal(3, 0, 100), metal(1, 900, 1000)]);
+        let a = g.anchor(50, 5).unwrap();
+        assert_eq!(g.shapes[a].layer, 3, "the covering shape wins even though it is higher");
     }
 }
