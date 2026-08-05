@@ -74,49 +74,44 @@ Correlated against OpenROAD `check_antennas` on a routed sky130 block (~2500 net
 
 | | |
 | --- | --- |
-| Violating nets OpenROAD found | 73 |
-| Violations matched exactly (net + pin + layer + ratio) | **51 of 83** |
-| Violations this engine adds | **~935** |
-| Ratio values within 2% of OpenROAD's | **36 of 109** compared |
+| Ratio values within 2% of OpenROAD's | **37 of 38** compared |
+| Violations OpenROAD does not confirm | **6** |
+| Violations matched exactly (net + pin + layer + ratio) | 37 of 83 |
+| Violations missed | 46 |
 
-**Read the third row before trusting a verdict.** It finds most real violations and reports many
-that are not real. Useful today as a *screen* — a flagged net is worth looking at, a clean run is
-weak evidence — and **not a sign-off gate**. Run OpenROAD's `check_antennas` to gate a tapeout.
+**Where it produces a number, that number is right.** What it currently lacks is *recall* — it
+misses more than half of the real violations. So a flagged net is now strong evidence, and a
+clean run is still weak evidence. Not a sign-off gate: run `check_antennas` to gate a tapeout.
 
-The trend is the useful part: attributing metal per gate by walking the routing (rather than
-summing the net's metal per layer) cut false positives from ~2400 to ~935 and lifted value
-agreement from 5% to 33%.
+### The one remaining error, specified
 
-### What is still wrong, localised
+Diffusion area is accumulated **net-wide**; OpenROAD accumulates it **per conductor**
+(`info.iterm_diff_area += diffArea(...)` over the gates of a node). A net-wide total is never
+smaller than a region's, so our diffusion-dependent limit comes out too *high* and violations
+slip under it — which is exactly the shape of the misses: the limit deltas on disagreeing
+records are all positive (352.1, 347.8, 173.9, 2726.0).
 
-Two independent errors, measured rather than assumed:
+Two smaller deltas from the same reading of `AntennaChecker.cc`: the layer `metal_factor` /
+`side_metal_factor` multipliers are not applied, and `diff_psr` is computed by a distinct
+formula (`− minus_diff_factor × diff_area` in the numerator, `+ plus_diff_protect` in the
+denominator, scaled by the `AreaDiffReduce` PWL) — and it is `diff_psr`, not `psr`, that
+OpenROAD compares against a diffusion PWL limit.
 
-**The numerator is too large — always.** Of 109 records both engines produced, not one of ours
-is below 0.9× OpenROAD's. Restricting to the 46 where the *limit* already agrees — isolating the
-numerator — **none** lands within 10%; all are 1.1× to 5×+ high. So metal is still being
-attributed to gates that OpenROAD does not attribute to them.
+### How the model was arrived at
 
-**Diffusion is applied net-wide, not per stage.** The real limit moves as the path to diffusion
-completes: OpenROAD's own report shows one pin requiring 400.00 on met1 and 3119.36 on met2.
-One net-wide diffusion area for every layer sets the bar wrong, and is why ~58% of shared
-records disagree on the limit.
+Worth stating because two plausible models were wrong first:
 
-**Cut layers are not checked.** OpenROAD evaluates `mcon`/`via`/`via2` against their own ratios;
-this engine evaluates routing layers only.
+1. **Sum gate areas across the whole net.** Hid 68 of 73 violating nets — the denominator was
+   inflated by the gate count.
+2. **Charge each gate its own area.** Over-reported by the gate count instead: exactly 2.00× on
+   two-gate regions, which is what gave the model away.
+3. **Charge each conductor, denominator summed over the gates on it.** Confirmed by reading
+   `AntennaChecker.cc`, and checked numerically first: region metal of 1603.33 µm² over its
+   three gates (0.4347 + 0.4347 + 0.126 = 0.9954) gives 1610.7 against OpenROAD's 1611.2.
 
-#### A hypothesis that measurement rejected
-
-Perimeter double-counting at junctions looked like the leading suspect: shapes were summed as
-raw rectangles, and every join between abutting collinear segments contributes two interior
-edges that no physical wire has — which matters most here because sky130's only antenna limit
-has a perimeter numerator.
-
-Replacing the sum with an exact union changed the result by **one violation** (986 → 985), with
-identical match counts and identical value agreement. The router evidently emits few enough
-abutting fragments that the inflation was negligible on this design. The union is correct and
-stays, but it was not the error, and the residual over-attribution is in **connectivity** rather
-than geometry. Recorded because a plausible, well-argued hypothesis that fails a measurement is
-worth as much as one that passes.
+A separate hypothesis — that summing rectangle perimeters instead of unioning them was the
+dominant error — was implemented exactly and **rejected by measurement**: it changed the result
+by one violation. The union is correct and stays; it simply was not the problem.
 
 ## Other stated bounds
 
