@@ -84,6 +84,9 @@
 //! technology stating no antenna limit in *either* form ([`Report::no_rules_found`]), and a net
 //! with no gate area ([`Report::nets_no_gate`]) — with no denominator there is no ratio.
 
+pub mod graph;
+
+use graph::WireGraph;
 use serde::Serialize;
 use vyges_opendb::{DiffCurve, Db};
 
@@ -135,39 +138,48 @@ pub struct Violation {
     pub metal_area_um2: f64,
 }
 
-/// Per-layer metal on one net, in µm², ordered bottom-up by routing level.
+/// Metal one gate has collected by the time a given layer is deposited, in µm².
 #[derive(Debug, Clone, Serialize)]
-pub struct LayerMetal {
+pub struct StageMetal {
     pub layer: String,
-    pub routing_level: i32,
+    /// odb layer number — the stage order, ascending.
+    pub layer_number: i64,
+    /// Metal on this layer alone, reachable from the gate (the PAR numerator).
     pub area_um2: f64,
     /// Perimeter × layer thickness. Zero when the LEF states no thickness — in which case the
     /// side-area ratios are *unavailable*, not zero, and are skipped rather than passed.
     pub side_area_um2: f64,
+    /// Metal on this layer and every layer below, reachable from the gate (the CAR numerator).
+    pub cum_area_um2: f64,
+    pub cum_side_area_um2: f64,
 }
 
-/// One gate pin on a net, with its own gate area.
+/// One gate pin and the metal it is exposed to, stage by stage.
 ///
-/// The ratio is evaluated **per gate pin**, never against the net's total. The antenna
-/// protects an individual transistor gate: the charge collected by the metal reaches every
-/// gate on the net, so each is exposed to all of it. Summing the gate areas of a net's pins
-/// would inflate the denominator by the pin count and silently under-report — measured against
-/// OpenROAD's `check_antennas`, that error hid 68 of 73 violating nets on a real block.
+/// The ratio is evaluated **per gate**, against **only the metal reachable from that gate**.
+/// Both halves matter and both were learned by correlating against OpenROAD `check_antennas`:
+/// summing a net's gate areas hid 68 of 73 violating nets, and charging a net's whole per-layer
+/// metal to every gate produced thousands of violations that were not real.
 #[derive(Debug, Clone, Serialize)]
-pub struct PinGate {
+pub struct GateExposure {
     pub pin: String,
     pub gate_area_um2: f64,
+    /// Ascending by layer — CAR/CSR are only meaningful in manufacturing order.
+    pub stages: Vec<StageMetal>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NetAntenna {
     pub net: String,
-    /// Every pin on the net that carries a gate area — each evaluated separately.
-    pub gates: Vec<PinGate>,
     /// Diffusion area on the net (µm²) — the index into the diff-ratio curves. More diffusion
     /// means a higher permitted ratio, which is exactly how a protection diode earns relief.
     pub diff_area_um2: f64,
-    pub layers: Vec<LayerMetal>,
+    /// Every pin on the net carrying a gate area, each with its own exposure.
+    pub gates: Vec<GateExposure>,
+    /// Pins with a gate area that could not be anchored to the routing (unplaced, or sitting
+    /// over no metal). Reported rather than dropped: an unanchored gate is unchecked, and
+    /// silently skipping it would look identical to passing.
+    pub gates_unanchored: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -190,6 +202,10 @@ pub struct Report {
     /// True when no layer in the design carried a usable antenna rule — the verdict is then
     /// vacuous and must not be read as "clean".
     pub no_rules_found: bool,
+    /// Gates that could not be anchored to the routing (unplaced pin, or a pin sitting over no
+    /// metal). Each is a gate that went unchecked, so this is reported rather than dropped —
+    /// silently skipping one looks exactly like passing it.
+    pub gates_unanchored: usize,
     pub violations: Vec<Violation>,
 }
 
@@ -199,40 +215,27 @@ pub struct Report {
 /// nothing. The DBU→µm conversion happens here, once, because the LEF states gate area in µm²
 /// while the database states geometry in DBU: comparing them raw is a ~10⁶ error on sky130.
 pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
-    let n_layers = db.num_net_wire_layers(net);
-    if n_layers == 0 {
+    let graph = WireGraph::new(db.net_wire_shapes(net));
+    if graph.is_empty() || graph.layers.is_empty() {
         return None;
     }
     let dbu2 = dbu * dbu;
 
-    let mut layers: Vec<LayerMetal> = (0..n_layers)
-        .map(|i| db.nth_net_wire_layer(net, i))
-        .filter(|l| !l.is_empty())
-        .map(|layer| {
-            let area = db.net_wire_area_on_layer(net, &layer) as f64 / dbu2;
-            let perim = db.net_wire_perimeter_on_layer(net, &layer) as f64;
-            let thick = db.layer_thickness(&layer) as f64;
-            LayerMetal {
-                routing_level: db.layer_get_routing_level(&layer),
-                // Thickness of 0 means the LEF stated none; the product is then 0, which
-                // `check_net` treats as "unavailable" and skips rather than passing.
-                side_area_um2: (perim * thick) / dbu2,
-                area_um2: area,
-                layer,
-            }
+    // Layer name and thickness per stage, resolved once rather than per gate.
+    let layer_info: Vec<(String, f64)> = graph
+        .layers
+        .iter()
+        .map(|&n| {
+            let name = db.layer_name_by_number(n);
+            let thick = db.layer_thickness(&name) as f64;
+            (name, thick)
         })
         .collect();
-    // CAR/CSR are only meaningful bottom-up: the charge a gate sees accumulated in
-    // manufacturing order, so the accumulation must follow routing level, not name order.
-    layers.sort_by_key(|l| l.routing_level);
 
-    // The denominator: gate area of every pin on the net that has an antenna model. Output
-    // pins have no gate, so they contribute nothing and are naturally excluded by the model
-    // lookup returning 0.0.
-    // Gate areas stay PER PIN (each is its own denominator); diffusion is summed over the net,
-    // because the charge drains through whatever diffusion the net reaches.
-    let mut gates: Vec<PinGate> = Vec::new();
+    let mut gates: Vec<GateExposure> = Vec::new();
+    let mut gates_unanchored = 0usize;
     let mut diff_area_um2 = 0.0f64;
+
     for iterm in db.net_iterms(net) {
         // iterms are "inst/pin"; hierarchical instance names contain slashes, so split from
         // the RIGHT — splitting at the first slash silently picks the wrong instance.
@@ -241,14 +244,47 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
         if master.is_empty() {
             continue;
         }
-        let gate = db.mterm_antenna_gate_area(&master, pin);
-        if gate > 0.0 {
-            gates.push(PinGate { pin: iterm.clone(), gate_area_um2: gate });
-        }
+        // Diffusion drains charge wherever it sits on the net, so it accumulates net-wide.
         diff_area_um2 += db.mterm_antenna_diff_area(&master, pin);
+
+        let gate = db.mterm_antenna_gate_area(&master, pin);
+        if gate <= 0.0 {
+            continue; // not a gate: no denominator, nothing to check
+        }
+        // Anchor the gate to the metal it actually touches. Without a location we cannot say
+        // which conductor it is on, and guessing would attribute someone else's metal to it.
+        let Some((x, y)) = db.iterm_avg_xy(inst, pin) else {
+            gates_unanchored += 1;
+            continue;
+        };
+        let Some(anchor) = graph.anchor(x, y) else {
+            gates_unanchored += 1;
+            continue;
+        };
+
+        let stages = graph
+            .collected_by_stage(anchor)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (layer_number, c))| {
+                let (name, thick) = &layer_info[i];
+                StageMetal {
+                    layer: name.clone(),
+                    layer_number,
+                    area_um2: c.layer_area as f64 / dbu2,
+                    // Thickness of 0 means the LEF stated none; the product is then 0, which
+                    // `check_net` treats as "unavailable" and skips rather than passing.
+                    side_area_um2: (c.layer_perimeter as f64 * thick) / dbu2,
+                    cum_area_um2: c.cumulative_area as f64 / dbu2,
+                    cum_side_area_um2: (c.cumulative_perimeter as f64 * thick) / dbu2,
+                }
+            })
+            .collect();
+
+        gates.push(GateExposure { pin: iterm.clone(), gate_area_um2: gate, stages });
     }
 
-    Some(NetAntenna { net: net.to_string(), gates, diff_area_um2, layers })
+    Some(NetAntenna { net: net.to_string(), diff_area_um2, gates, gates_unanchored })
 }
 
 /// A piecewise-linear antenna limit: `(diffusion area µm², ratio limit)` points, ascending.
@@ -371,26 +407,18 @@ pub fn read_layer_rules(db: &Db, layer: &str) -> LayerRules {
 /// design. `rules` maps layer name to limits; a layer missing from the map is treated as
 /// having no rule.
 ///
-/// A layer with no rule still contributes to the cumulative totals but is never itself
-/// compared: omitting its metal from CAR would under-report the charge that layers above it
-/// inherit, which is precisely the error the cumulative ratio exists to catch.
+/// Each gate is judged on **its own** collected metal, stage by stage. A layer with no rule
+/// still contributes to the cumulative totals (the walk already accumulated it) but is never
+/// itself compared: omitting its metal from CAR would under-report the charge that layers
+/// above it inherit, which is precisely the error the cumulative ratio exists to catch.
 pub fn check_net(
     net: &NetAntenna,
     rules: &std::collections::BTreeMap<String, LayerRules>,
     out: &mut Vec<Violation>,
 ) {
-    if net.gates.is_empty() {
-        return; // no gate: the ratio has no denominator, so there is nothing to decide
-    }
-    let (mut cum_area, mut cum_side) = (0.0f64, 0.0f64);
-    for l in &net.layers {
-        cum_area += l.area_um2;
-        cum_side += l.side_area_um2;
-        let Some(r) = rules.get(&l.layer).filter(|r| r.has_any_limit()) else { continue };
-
-        // One verdict per GATE PIN. All of this layer's metal is charged against each gate
-        // individually, because the collected charge reaches all of them.
-        for g in &net.gates {
+    for g in &net.gates {
+        for st in &g.stages {
+            let Some(r) = rules.get(&st.layer).filter(|r| r.has_any_limit()) else { continue };
             let mut test = |ratio: Ratio, area: f64| {
                 // The limit depends on the net's diffusion area when the technology states a
                 // diff-ratio curve — which is how a protection diode raises the bar rather
@@ -400,7 +428,7 @@ pub fn check_net(
                     out.push(Violation {
                         net: net.net.clone(),
                         pin: g.pin.clone(),
-                        layer: l.layer.clone(),
+                        layer: st.layer.clone(),
                         ratio,
                         value,
                         limit,
@@ -410,13 +438,13 @@ pub fn check_net(
                     });
                 }
             };
-            test(Ratio::Par, l.area_um2);
-            test(Ratio::Car, cum_area);
+            test(Ratio::Par, st.area_um2);
+            test(Ratio::Car, st.cum_area_um2);
             // Side-area ratios need a stated thickness; without one the side area is unknown,
             // and testing it as 0 would report a pass we have not earned.
-            if l.side_area_um2 > 0.0 {
-                test(Ratio::Psr, l.side_area_um2);
-                test(Ratio::Csr, cum_side);
+            if st.side_area_um2 > 0.0 {
+                test(Ratio::Psr, st.side_area_um2);
+                test(Ratio::Csr, st.cum_side_area_um2);
             }
         }
     }
@@ -433,6 +461,7 @@ pub fn check_design(db: &Db) -> Report {
         nets_unrouted: 0,
         layers_without_rules: Vec::new(),
         no_rules_found: true,
+        gates_unanchored: 0,
         violations: Vec::new(),
     };
     if dbu <= 0.0 {
@@ -451,14 +480,15 @@ pub fn check_design(db: &Db) -> Report {
             r.nets_unrouted += 1;
             continue;
         };
-        for l in &na.layers {
+        r.gates_unanchored += na.gates_unanchored;
+        for st in na.gates.iter().flat_map(|g| &g.stages) {
             let entry = rules
-                .entry(l.layer.clone())
-                .or_insert_with(|| read_layer_rules(db, &l.layer));
+                .entry(st.layer.clone())
+                .or_insert_with(|| read_layer_rules(db, &st.layer));
             if entry.has_any_limit() {
                 r.no_rules_found = false;
-            } else if !r.layers_without_rules.contains(&l.layer) {
-                r.layers_without_rules.push(l.layer.clone());
+            } else if !r.layers_without_rules.contains(&st.layer) {
+                r.layers_without_rules.push(st.layer.clone());
             }
         }
         if na.gates.is_empty() {
