@@ -236,16 +236,23 @@ fn sky130_diff_psr() -> Pwl {
     Pwl(vec![(0.0, 400.0), (0.0125, 400.0), (0.0225, 2609.0), (22.5, 11600.0)])
 }
 
+/// Matches OpenROAD's `getPwlFactor`: interpolate inside the table, **extrapolate** past the
+/// last point along the final segment's slope.
+///
+/// We would rather clamp — extrapolating raises the permitted ratio without evidence, which is
+/// the unsafe direction — but a checker that disagrees with the incumbent is not usable as a
+/// cross-check, and real diffusion areas sit far inside the table. Pinned so the difference
+/// stays a deliberate choice rather than drifting.
 #[test]
-fn pwl_interpolates_between_points_and_clamps_outside() {
+fn pwl_interpolates_inside_and_extrapolates_past_the_end() {
     let c = sky130_diff_psr();
-    // Clamped below the first index and above the last: a LEF table states the limit over the
-    // diffusion areas the foundry characterised, and extrapolating past either end would be
-    // inventing an answer the technology never gave.
+    // Below the first index the first ratio holds.
     assert_eq!(c.eval(-1.0), Some(400.0));
     assert_eq!(c.eval(0.0), Some(400.0));
-    assert_eq!(c.eval(1000.0), Some(11600.0));
     assert_eq!(c.eval(0.005), Some(400.0), "flat segment");
+    // Past the last point (22.5, 11600), continuing the final slope of
+    // (11600-2609)/(22.5-0.0225) = 400 per unit.
+    assert_eq!(c.eval(1000.0), Some(11600.0 + (1000.0 - 22.5) * 400.0));
     // Midway across (0.0125, 400) -> (0.0225, 2609): 400 + (2609-400)/2 = 1504.5
     let mid = c.eval(0.0175).unwrap();
     assert!((mid - 1504.5).abs() < 1e-9, "interpolated {mid}, expected 1504.5");
@@ -347,4 +354,70 @@ fn the_limit_uses_this_conductors_diffusion_not_the_nets() {
     assert_eq!(v[0].pin, "bare/A");
     assert!((v[0].limit - 400.0).abs() < 1e-9, "limit at zero diffusion, not at the net's 22.5");
     assert_eq!(v[0].diff_area_um2, 0.0);
+}
+
+/// The diffusion branch, transcribed from OpenROAD's `calculateWirePar`. A diode's relief shows
+/// up twice: subtracted from the numerator and added to the denominator.
+#[test]
+fn the_diffusion_branch_applies_both_relief_terms() {
+    let r = LayerRules {
+        valid: true,
+        psr: 0.0, // sky130 states no plain PSR — so the diffusion branch always applies
+        diff_psr: sky130_diff_psr(),
+        diff_side_metal_factor: 2.0,
+        minus_diff_factor: 10.0,
+        plus_diff_factor: 3.0,
+        ..Default::default()
+    };
+    // side_area 100, gate 1.0, diff 2.0:
+    //   numerator   = 2.0 * 100 * 1.0 (no reduce curve) - 10.0 * 2.0 = 180
+    //   denominator = 1.0 + 3.0 * 2.0 = 7
+    let (value, limit) = r.evaluate(Ratio::Psr, 100.0, 1.0, 2.0);
+    assert!((value - 180.0 / 7.0).abs() < 1e-9, "got {value}");
+    // The limit is the curve at diff = 2.0, interpolated on the (0.0225, 2609)-(22.5, 11600)
+    // segment whose slope is 400.
+    assert!((limit - (2609.0 + (2.0 - 0.0225) * 400.0)).abs() < 1e-6, "got {limit}");
+}
+
+/// With no diffusion the plain factor applies and the relief terms vanish — but on a technology
+/// stating no plain ratio the *limit* still comes from the diffusion curve, evaluated at zero.
+#[test]
+fn without_diffusion_the_curve_is_still_the_limit_when_no_plain_ratio_exists() {
+    let r = LayerRules {
+        valid: true,
+        psr: 0.0,
+        diff_psr: sky130_diff_psr(),
+        side_metal_factor: 2.0,
+        minus_diff_factor: 10.0, // must NOT apply — there is no diffusion to relieve with
+        plus_diff_factor: 3.0,
+        ..Default::default()
+    };
+    let (value, limit) = r.evaluate(Ratio::Psr, 100.0, 1.0, 0.0);
+    assert!((value - 200.0).abs() < 1e-9, "2.0 * 100 / 1.0, no relief: got {value}");
+    assert!((limit - 400.0).abs() < 1e-9, "the curve at zero diffusion");
+}
+
+/// A stated plain ratio wins when the conductor has no diffusion — the diffusion form is for
+/// conductors that actually carry some.
+#[test]
+fn a_plain_ratio_is_used_when_it_exists_and_there_is_no_diffusion() {
+    let r = LayerRules {
+        valid: true,
+        psr: 50.0,
+        diff_psr: sky130_diff_psr(),
+        side_metal_factor: 2.0,
+        ..Default::default()
+    };
+    let (value, limit) = r.evaluate(Ratio::Psr, 100.0, 1.0, 0.0);
+    assert!((value - 200.0).abs() < 1e-9);
+    assert!((limit - 50.0).abs() < 1e-9, "the plain ratio, not the curve");
+}
+
+/// Factors default to identity, so a technology stating none behaves as the bare ratio.
+#[test]
+fn absent_factors_leave_the_ratio_unscaled() {
+    let r = LayerRules { valid: true, psr: 10.0, ..Default::default() };
+    let (value, limit) = r.evaluate(Ratio::Psr, 100.0, 4.0, 0.0);
+    assert!((value - 25.0).abs() < 1e-9, "100/4 unscaled");
+    assert!((limit - 10.0).abs() < 1e-9);
 }

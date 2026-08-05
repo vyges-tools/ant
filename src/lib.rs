@@ -325,9 +325,16 @@ impl Pwl {
 
     /// The limit at diffusion area `x`, or `None` when the curve is unset.
     ///
-    /// Outside the stated range the curve is **clamped**, not extrapolated: a LEF table states
-    /// the limit over the diffusion areas the foundry characterised, and inventing values past
-    /// either end would be manufacturing an answer the technology never gave.
+    /// Interpolates within the stated range and **extrapolates past the last point along the
+    /// final segment's slope** — matching OpenROAD's `getPwlFactor`, which this exists to
+    /// correlate against.
+    ///
+    /// We would rather clamp: a LEF table states the limit over the diffusion areas the foundry
+    /// characterised, and extrapolating past the end raises the permitted ratio without
+    /// evidence, which is the unsafe direction. Matching the reference wins here because a
+    /// checker that disagrees with the incumbent is not usable as a cross-check, and on real
+    /// data the diffusion areas sit far inside the table. Recorded as a deliberate difference
+    /// from our own preference, not an oversight.
     pub fn eval(&self, x: f64) -> Option<f64> {
         let p = &self.0;
         match p.len() {
@@ -337,15 +344,19 @@ impl Pwl {
                 if x <= p[0].0 {
                     return Some(p[0].1);
                 }
-                if x >= p[p.len() - 1].0 {
-                    return Some(p[p.len() - 1].1);
+                for w in p.windows(2) {
+                    let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+                    if x >= x0 && x < x1 {
+                        let span = x1 - x0;
+                        // Coincident indices would divide by zero; take the left value, which
+                        // is what a step at that point means.
+                        return Some(if span == 0.0 { y0 } else { y0 + (y1 - y0) * (x - x0) / span });
+                    }
                 }
-                let i = p.windows(2).position(|w| x >= w[0].0 && x <= w[1].0)?;
-                let ((x0, y0), (x1, y1)) = (p[i], p[i + 1]);
+                // Past the last point: continue along the final segment.
+                let ((x0, y0), (x1, y1)) = (p[p.len() - 2], p[p.len() - 1]);
                 let span = x1 - x0;
-                // Coincident indices would divide by zero; take the left value, which is what
-                // a step at that point means.
-                Some(if span == 0.0 { y0 } else { y0 + (y1 - y0) * (x - x0) / span })
+                Some(if span == 0.0 { y1 } else { y1 + (y1 - y0) * (x - x1) / span })
             }
         }
     }
@@ -356,7 +367,7 @@ impl Pwl {
 /// A plain limit of `0.0` means the LEF declares none for that ratio — **not** a limit of zero,
 /// which would fail every net carrying any metal at all. That distinction is the difference
 /// between a checker and a nuisance, so it lives in one place: [`LayerRules::exceeds`].
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayerRules {
     /// Whether the layer states any *plain* ratio (odb's `isValid`, which tests exactly that).
     pub valid: bool,
@@ -369,6 +380,52 @@ pub struct LayerRules {
     pub diff_car: Pwl,
     pub diff_psr: Pwl,
     pub diff_csr: Pwl,
+
+    // ---- scaling factors (LEF ANTENNA*FACTOR) ----
+    // Default to 1.0/0.0 so a technology stating none behaves as a plain ratio.
+    /// `ANTENNAAREAFACTOR`, applied when the region has no diffusion.
+    pub metal_factor: f64,
+    /// Same factor, applied when it does — LEF can restrict it to the diffusion case
+    /// (`isAreaFactorDiffUseOnly`), in which case only this one is set.
+    pub diff_metal_factor: f64,
+    /// `ANTENNASIDEAREAFACTOR`, and its diffusion-restricted twin.
+    pub side_metal_factor: f64,
+    pub diff_side_metal_factor: f64,
+    /// `ANTENNAAREAMINUSDIFF` — subtracted from the numerator, scaled by diffusion area.
+    pub minus_diff_factor: f64,
+    /// `ANTENNAGATEPLUSDIFF` — added to the denominator, scaled by diffusion area. Superseded
+    /// by [`LayerRules::gate_plus_diff`] when that curve is stated.
+    pub plus_diff_factor: f64,
+    /// PWL form of the gate-plus-diff protection term.
+    pub gate_plus_diff: Pwl,
+    /// `ANTENNAAREADIFFREDUCEPWL` — scales the numerator down as diffusion grows.
+    pub area_diff_reduce: Pwl,
+}
+
+impl Default for LayerRules {
+    fn default() -> Self {
+        Self {
+            valid: false,
+            par: 0.0,
+            car: 0.0,
+            psr: 0.0,
+            csr: 0.0,
+            diff_par: Pwl::default(),
+            diff_car: Pwl::default(),
+            diff_psr: Pwl::default(),
+            diff_csr: Pwl::default(),
+            // A technology stating no factors must behave exactly as the bare ratio, so the
+            // multiplicative ones default to 1 and the additive ones to 0.
+            metal_factor: 1.0,
+            diff_metal_factor: 1.0,
+            side_metal_factor: 1.0,
+            diff_side_metal_factor: 1.0,
+            minus_diff_factor: 0.0,
+            plus_diff_factor: 0.0,
+            gate_plus_diff: Pwl::default(),
+            area_diff_reduce: Pwl::default(),
+        }
+    }
 }
 
 impl LayerRules {
@@ -398,6 +455,55 @@ impl LayerRules {
         pwl.eval(diff_area_um2).unwrap_or(plain)
     }
 
+    /// The computed ratio and the limit it is judged against, for one conductor.
+    ///
+    /// This is OpenROAD's `calculateWirePar` + `checkPSR`/`checkPAR` decision, transcribed:
+    ///
+    /// - A **diffusion** form is used when the region has diffusion **or** the technology states
+    ///   no plain ratio. On sky130 the plain PSR is 0, so the diffusion form is always the one
+    ///   in play — which is why an implementation without it finds nothing there.
+    /// - With diffusion present, the numerator loses `minus_diff_factor × diff` and the
+    ///   denominator gains a protection term (`plus_diff_factor × diff`, or the
+    ///   `gate_plus_diff` curve where stated). That is a diode's relief expressed twice over.
+    /// - `area_diff_reduce` scales the numerator down as diffusion grows.
+    ///
+    /// Returns `(value, limit)`; a limit of 0.0 means none is declared and nothing is decided.
+    pub fn evaluate(&self, ratio: Ratio, metal: f64, gate_area: f64, diff: f64) -> (f64, f64) {
+        if gate_area <= 0.0 {
+            return (0.0, 0.0); // no denominator, no ratio
+        }
+        let is_side = matches!(ratio, Ratio::Psr | Ratio::Csr);
+        let (curve, plain) = match ratio {
+            Ratio::Par => (&self.diff_par, self.par),
+            Ratio::Car => (&self.diff_car, self.car),
+            Ratio::Psr => (&self.diff_psr, self.psr),
+            Ratio::Csr => (&self.diff_csr, self.csr),
+        };
+        let (factor, diff_factor) = if is_side {
+            (self.side_metal_factor, self.diff_side_metal_factor)
+        } else {
+            (self.metal_factor, self.diff_metal_factor)
+        };
+        let reduce = self.area_diff_reduce.eval(diff).unwrap_or(1.0);
+
+        if diff != 0.0 || plain == 0.0 {
+            let value = if diff != 0.0 {
+                let protect = if self.gate_plus_diff.is_empty() {
+                    self.plus_diff_factor * diff
+                } else {
+                    self.gate_plus_diff.eval(diff).unwrap_or(0.0)
+                };
+                (diff_factor * metal * reduce - self.minus_diff_factor * diff)
+                    / (gate_area + protect)
+            } else {
+                factor * metal * reduce / gate_area
+            };
+            (value, curve.eval(diff).unwrap_or(0.0))
+        } else {
+            (factor * metal / gate_area, plain)
+        }
+    }
+
     /// Whether this layer states any usable antenna limit, in either form. Used to tell a
     /// genuinely clean design from one the technology gave us nothing to check.
     pub fn has_any_limit(&self) -> bool {
@@ -412,6 +518,13 @@ impl LayerRules {
 /// Read one layer's antenna limits from the technology, in both forms.
 pub fn read_layer_rules(db: &Db, layer: &str) -> LayerRules {
     let pwl = |c| Pwl(db.layerantenna_diff_pwl(layer, c));
+    let area_f = db.layerantenna_get_area_factor(layer);
+    let side_f = db.layerantenna_get_side_area_factor(layer);
+    // LEF can restrict a factor to the diffusion case. When it does, the non-diffusion form
+    // keeps its default of 1.0 — applying the factor there would scale a ratio the technology
+    // never scaled.
+    let area_diff_only = db.layerantenna_is_area_factor_diff_use_only(layer);
+    let side_diff_only = db.layerantenna_is_side_area_factor_diff_use_only(layer);
     LayerRules {
         valid: db.layerantenna_is_valid(layer),
         par: db.layerantenna_get_p_a_r(layer),
@@ -422,6 +535,14 @@ pub fn read_layer_rules(db: &Db, layer: &str) -> LayerRules {
         diff_car: pwl(DiffCurve::Car),
         diff_psr: pwl(DiffCurve::Psr),
         diff_csr: pwl(DiffCurve::Csr),
+        metal_factor: if area_diff_only { 1.0 } else { area_f },
+        diff_metal_factor: area_f,
+        side_metal_factor: if side_diff_only { 1.0 } else { side_f },
+        diff_side_metal_factor: side_f,
+        minus_diff_factor: db.layerantenna_get_area_minus_diff_factor(layer),
+        plus_diff_factor: db.layerantenna_get_gate_plus_diff_factor(layer),
+        gate_plus_diff: pwl(DiffCurve::GatePlusDiff),
+        area_diff_reduce: pwl(DiffCurve::AreaDiffReduce),
     }
 }
 
@@ -443,11 +564,10 @@ pub fn check_net(
     for rg in &net.regions {
         let Some(r) = rules.get(&rg.layer).filter(|r| r.has_any_limit()) else { continue };
         let mut test = |ratio: Ratio, area: f64| {
-            // The limit is indexed by THIS conductor's diffusion when the technology states a
-            // diff-ratio curve — how a protection diode raises the bar for the gates it
-            // actually shares metal with, rather than for the whole net.
-            let limit = r.limit(ratio, rg.diff_area_um2);
-            if let Some(value) = LayerRules::exceeds(limit, area, rg.gate_area_um2) {
+            // Value and limit together: which of them applies depends on whether THIS conductor
+            // carries diffusion, so they cannot be computed independently.
+            let (value, limit) = r.evaluate(ratio, area, rg.gate_area_um2, rg.diff_area_um2);
+            if limit > 0.0 && value > limit {
                 for pin in &rg.pins {
                     out.push(Violation {
                         net: net.net.clone(),
