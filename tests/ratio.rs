@@ -6,7 +6,7 @@
 //! inferred from a design that happens to exercise them.
 
 use std::collections::BTreeMap;
-use vyges_ant::{check_net, LayerMetal, LayerRules, NetAntenna, Pwl, Ratio, Violation};
+use vyges_ant::{check_net, LayerMetal, LayerRules, NetAntenna, PinGate, Pwl, Ratio, Violation};
 
 fn layer(name: &str, level: i32, area: f64, side: f64) -> LayerMetal {
     LayerMetal { layer: name.into(), routing_level: level, area_um2: area, side_area_um2: side }
@@ -36,7 +36,7 @@ fn par_flags_only_above_the_limit() {
     // stated limit is legal, and rounding a boundary case into a violation is a false alarm.
     let at = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 10.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 10.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 100.0, 0.0)],
     };
@@ -44,7 +44,7 @@ fn par_flags_only_above_the_limit() {
 
     let over = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 10.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 10.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 100.1, 0.0)],
     };
@@ -65,7 +65,7 @@ fn car_catches_what_par_cannot() {
     // 9x and 9x individually — both under PAR 10 — but 18x cumulative, over CAR 15.
     let net = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 1.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 1.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 9.0, 0.0), layer("met2", 2, 9.0, 0.0)],
     };
@@ -86,7 +86,7 @@ fn unruled_layers_still_accumulate_into_car() {
     ]);
     let net = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 1.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 1.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 10.0, 0.0), layer("met2", 2, 8.0, 0.0)],
     };
@@ -102,7 +102,7 @@ fn invalid_rules_are_not_applied() {
     let r = rules(vec![("met1", LayerRules { valid: false, par: 0.001, ..Default::default() })]);
     let net = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 1.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 1.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 1000.0, 0.0)],
     };
@@ -116,7 +116,7 @@ fn no_gate_area_yields_no_verdict() {
     let r = rules(vec![("met1", m1_par_only())]);
     let net = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 0.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 0.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 1e6, 0.0)],
     };
@@ -134,7 +134,7 @@ fn side_ratios_skipped_when_thickness_unknown() {
     )]);
     let unknown = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 1.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 1.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 5.0, 0.0)], // thickness unstated -> side area 0
     };
@@ -142,7 +142,7 @@ fn side_ratios_skipped_when_thickness_unknown() {
 
     let known = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 1.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 1.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 5.0, 2.0)],
     };
@@ -222,7 +222,7 @@ fn diffusion_raises_the_limit_and_can_clear_a_violation() {
     // Side-area ratio of 1000: over the 400 limit at zero diffusion.
     let bare = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 1.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 1.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 0.0, 1000.0)],
     };
@@ -254,7 +254,7 @@ fn a_layer_with_only_a_diff_curve_is_checked() {
     let r = rules(vec![("met1", only_curve)]);
     let net = NetAntenna {
         net: "n".into(),
-        gate_area_um2: 1.0,
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 1.0 }],
         diff_area_um2: 0.0,
         layers: vec![layer("met1", 1, 0.0, 500.0)],
     };
@@ -266,4 +266,51 @@ fn a_layer_with_only_a_diff_curve_is_checked() {
 #[test]
 fn a_layer_with_nothing_stated_has_no_limit() {
     assert!(!LayerRules::default().has_any_limit());
+}
+
+/// **The regression this exists to prevent.** The ratio is charged against each gate pin
+/// separately, never against the net's summed gate area.
+///
+/// Physically: the charge collected by the metal reaches every gate on the net, so each gate is
+/// exposed to *all* of it. Summing the denominators asks "is this metal large relative to all
+/// the silicon it feeds", which no gate experiences.
+///
+/// Measured cost of getting this wrong: against OpenROAD `check_antennas` on a routed block,
+/// the summed-denominator version reported 5 of 73 violating nets — it hid 68, silently, in the
+/// direction that matters.
+#[test]
+fn the_ratio_is_per_gate_pin_not_per_net() {
+    let r = rules(vec![("met1", m1_par_only())]); // PAR limit 10.0
+    // Four pins of 1 µm² each. Summed, the denominator is 4 µm² and 30 µm² of metal gives a
+    // ratio of 7.5 — under the limit. Per pin it is 30.0, three times over.
+    let net = NetAntenna {
+        net: "n".into(),
+        gates: (0..4)
+            .map(|i| PinGate { pin: format!("u{i}/A"), gate_area_um2: 1.0 })
+            .collect(),
+        diff_area_um2: 0.0,
+        layers: vec![layer("met1", 1, 30.0, 0.0)],
+    };
+    let v = check(&net, &r);
+    assert_eq!(v.len(), 4, "every exposed gate is its own verdict: {v:?}");
+    for x in &v {
+        assert!((x.value - 30.0).abs() < 1e-9, "each gate sees all 30 µm², got {}", x.value);
+        assert_eq!(x.gate_area_um2, 1.0, "the denominator is one pin's gate, not the sum");
+    }
+    // Every pin named, so a report says which gate is at risk rather than only which net.
+    let pins: Vec<&str> = v.iter().map(|x| x.pin.as_str()).collect();
+    assert_eq!(pins, vec!["u0/A", "u1/A", "u2/A", "u3/A"]);
+}
+
+/// A pin with no gate area is not a gate; it must not become a zero-denominator verdict.
+#[test]
+fn pins_without_gate_area_are_not_evaluated() {
+    let r = rules(vec![("met1", m1_par_only())]);
+    let net = NetAntenna {
+        net: "n".into(),
+        gates: vec![PinGate { pin: "u1/A".into(), gate_area_um2: 0.0 }],
+        diff_area_um2: 0.0,
+        layers: vec![layer("met1", 1, 1e6, 0.0)],
+    };
+    assert!(check(&net, &r).is_empty());
 }

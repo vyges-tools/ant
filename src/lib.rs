@@ -99,13 +99,16 @@ impl Ratio {
 #[derive(Debug, Clone, Serialize)]
 pub struct Violation {
     pub net: String,
+    /// The gate pin the ratio was charged against (`inst/pin`). The verdict is per gate, not
+    /// per net, so a net can appear more than once.
+    pub pin: String,
     pub layer: String,
     pub ratio: Ratio,
     /// The computed ratio (dimensionless: µm² / µm²).
     pub value: f64,
     /// The LEF limit it exceeded.
     pub limit: f64,
-    /// Gate area on the net, µm² — carried so a report reads as a diagnosis rather than a
+    /// Gate area of THIS pin, µm² — carried so a report reads as a diagnosis rather than a
     /// number: a tiny denominator and a huge numerator are very different problems.
     pub gate_area_um2: f64,
     /// Diffusion area on the net, µm². It selects the limit on a diff-ratio curve, so a report
@@ -126,10 +129,24 @@ pub struct LayerMetal {
     pub side_area_um2: f64,
 }
 
+/// One gate pin on a net, with its own gate area.
+///
+/// The ratio is evaluated **per gate pin**, never against the net's total. The antenna
+/// protects an individual transistor gate: the charge collected by the metal reaches every
+/// gate on the net, so each is exposed to all of it. Summing the gate areas of a net's pins
+/// would inflate the denominator by the pin count and silently under-report — measured against
+/// OpenROAD's `check_antennas`, that error hid 68 of 73 violating nets on a real block.
+#[derive(Debug, Clone, Serialize)]
+pub struct PinGate {
+    pub pin: String,
+    pub gate_area_um2: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct NetAntenna {
     pub net: String,
-    pub gate_area_um2: f64,
+    /// Every pin on the net that carries a gate area — each evaluated separately.
+    pub gates: Vec<PinGate>,
     /// Diffusion area on the net (µm²) — the index into the diff-ratio curves. More diffusion
     /// means a higher permitted ratio, which is exactly how a protection diode earns relief.
     pub diff_area_um2: f64,
@@ -195,7 +212,10 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
     // The denominator: gate area of every pin on the net that has an antenna model. Output
     // pins have no gate, so they contribute nothing and are naturally excluded by the model
     // lookup returning 0.0.
-    let (mut gate_area_um2, mut diff_area_um2) = (0.0f64, 0.0f64);
+    // Gate areas stay PER PIN (each is its own denominator); diffusion is summed over the net,
+    // because the charge drains through whatever diffusion the net reaches.
+    let mut gates: Vec<PinGate> = Vec::new();
+    let mut diff_area_um2 = 0.0f64;
     for iterm in db.net_iterms(net) {
         // iterms are "inst/pin"; hierarchical instance names contain slashes, so split from
         // the RIGHT — splitting at the first slash silently picks the wrong instance.
@@ -204,11 +224,14 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
         if master.is_empty() {
             continue;
         }
-        gate_area_um2 += db.mterm_antenna_gate_area(&master, pin);
+        let gate = db.mterm_antenna_gate_area(&master, pin);
+        if gate > 0.0 {
+            gates.push(PinGate { pin: iterm.clone(), gate_area_um2: gate });
+        }
         diff_area_um2 += db.mterm_antenna_diff_area(&master, pin);
     }
 
-    Some(NetAntenna { net: net.to_string(), gate_area_um2, diff_area_um2, layers })
+    Some(NetAntenna { net: net.to_string(), gates, diff_area_um2, layers })
 }
 
 /// A piecewise-linear antenna limit: `(diffusion area µm², ratio limit)` points, ascending.
@@ -339,7 +362,7 @@ pub fn check_net(
     rules: &std::collections::BTreeMap<String, LayerRules>,
     out: &mut Vec<Violation>,
 ) {
-    if net.gate_area_um2 <= 0.0 {
+    if net.gates.is_empty() {
         return; // no gate: the ratio has no denominator, so there is nothing to decide
     }
     let (mut cum_area, mut cum_side) = (0.0f64, 0.0f64);
@@ -348,31 +371,36 @@ pub fn check_net(
         cum_side += l.side_area_um2;
         let Some(r) = rules.get(&l.layer).filter(|r| r.has_any_limit()) else { continue };
 
-        let mut test = |ratio: Ratio, area: f64| {
-            // The limit depends on the net's diffusion area when the technology states a
-            // diff-ratio curve — which is how a protection diode raises the bar rather than
-            // being invisible to the check.
-            let limit = r.limit(ratio, net.diff_area_um2);
-            if let Some(value) = LayerRules::exceeds(limit, area, net.gate_area_um2) {
-                out.push(Violation {
-                    net: net.net.clone(),
-                    layer: l.layer.clone(),
-                    ratio,
-                    value,
-                    limit,
-                    gate_area_um2: net.gate_area_um2,
-                    diff_area_um2: net.diff_area_um2,
-                    metal_area_um2: area,
-                });
+        // One verdict per GATE PIN. All of this layer's metal is charged against each gate
+        // individually, because the collected charge reaches all of them.
+        for g in &net.gates {
+            let mut test = |ratio: Ratio, area: f64| {
+                // The limit depends on the net's diffusion area when the technology states a
+                // diff-ratio curve — which is how a protection diode raises the bar rather
+                // than being invisible to the check.
+                let limit = r.limit(ratio, net.diff_area_um2);
+                if let Some(value) = LayerRules::exceeds(limit, area, g.gate_area_um2) {
+                    out.push(Violation {
+                        net: net.net.clone(),
+                        pin: g.pin.clone(),
+                        layer: l.layer.clone(),
+                        ratio,
+                        value,
+                        limit,
+                        gate_area_um2: g.gate_area_um2,
+                        diff_area_um2: net.diff_area_um2,
+                        metal_area_um2: area,
+                    });
+                }
+            };
+            test(Ratio::Par, l.area_um2);
+            test(Ratio::Car, cum_area);
+            // Side-area ratios need a stated thickness; without one the side area is unknown,
+            // and testing it as 0 would report a pass we have not earned.
+            if l.side_area_um2 > 0.0 {
+                test(Ratio::Psr, l.side_area_um2);
+                test(Ratio::Csr, cum_side);
             }
-        };
-        test(Ratio::Par, l.area_um2);
-        test(Ratio::Car, cum_area);
-        // Side-area ratios need a stated thickness; without one the side area is unknown, and
-        // testing it as 0 would report a pass we have not earned.
-        if l.side_area_um2 > 0.0 {
-            test(Ratio::Psr, l.side_area_um2);
-            test(Ratio::Csr, cum_side);
         }
     }
 }
@@ -416,7 +444,7 @@ pub fn check_design(db: &Db) -> Report {
                 r.layers_without_rules.push(l.layer.clone());
             }
         }
-        if na.gate_area_um2 <= 0.0 {
+        if na.gates.is_empty() {
             r.nets_no_gate += 1;
             continue;
         }
