@@ -92,10 +92,19 @@ relief terms, and the `AreaDiffReduce` scaling. Implementing the last of those c
 measured result by **nothing**, because sky130 states all of those factors as identity — worth
 knowing, and worth having for technologies that do not.
 
-**The residual is pin-to-conductor attachment.** This engine matches a pin to the metal it
-touches *geometrically* — the terminal's average point, falling back to the nearest shape of the
-same net. OpenROAD does not guess: it reads the attachment from the routing topology
-(`dbWireGraph::Node::object()`).
+**The residual is pin-to-conductor attachment.** This engine matches a pin to metal by
+proximity — the terminal's average point, falling back to the nearest shape of the same net.
+OpenROAD instead takes each terminal's own `dbMPin` boxes, applies the instance transform, and
+intersects them against wire nodes on the same, upper and lower layer (`AntennaChecker::saveGates`).
+
+**That method was implemented and measured worse, so it was reverted.** Faithful attachment gave
+53 exact matches and 91 false positives against the heuristic's 65 and 9. The reason is not yet
+understood — the likely suspect is that OpenROAD intersects against *merged per-layer node
+polygons* while this engine holds individual wire fragments, so a pin box shorts differently.
+The geometry shim (`Db::iterm_pin_boxes`) is kept for whoever resumes it.
+
+This is recorded rather than buried because the more principled method losing to the heuristic is
+the interesting fact, and shipping the better-measuring one is the discipline.
 
 Where the heuristic errs it merges conductors that should be separate. Measured on one missed
 violation: we place a gate and its protection diode on one conductor, giving a denominator of
