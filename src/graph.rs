@@ -233,9 +233,66 @@ impl WireGraph {
         uf
     }
 
+    /// Group gates into the conductors they share at `stage`, with what each conductor has
+    /// collected.
+    ///
+    /// `anchors[g]` is the shape gate `g` attaches to. Returns one entry per distinct
+    /// conductor: the gate indices on it, and its metal.
+    ///
+    /// Grouping matters because the ratio is charged **per region, not per gate**. The charge a
+    /// conductor collects is shared by every gate connected to it, so the denominator is the
+    /// summed gate area of the region. Measured against OpenROAD on one net: our region metal
+    /// of 1603.33 µm² over the region's three gates (0.4347 + 0.4347 + 0.126 = 0.9954) gives
+    /// 1610.7 against their 1611.2 — 0.03%. Charging each gate its own area instead gave 7.9×.
+    pub fn regions_at(&self, stage: i64, anchors: &[usize]) -> Vec<(Vec<usize>, Collected)> {
+        let mut uf = self.components_at(stage);
+        let mut by_root: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (g, &a) in anchors.iter().enumerate() {
+            by_root.entry(uf.find(a as u32)).or_default().push(g);
+        }
+        // Shapes of each conductor, per layer, for the union measure.
+        let mut shapes_by_root: HashMap<u32, HashMap<i64, Vec<(i32, i32, i32, i32)>>> =
+            HashMap::new();
+        for (i, s) in self.shapes.iter().enumerate() {
+            if s.is_via || s.layer < 0 || s.layer > stage {
+                continue;
+            }
+            let root = uf.find(i as u32);
+            if !by_root.contains_key(&root) {
+                continue; // a conductor with no gate on it collects for nobody
+            }
+            shapes_by_root
+                .entry(root)
+                .or_default()
+                .entry(s.layer)
+                .or_default()
+                .push((s.x0, s.y0, s.x1, s.y1));
+        }
+
+        by_root
+            .into_iter()
+            .map(|(root, gates)| {
+                let mut c = Collected::default();
+                if let Some(by_layer) = shapes_by_root.get(&root) {
+                    for (layer, rects) in by_layer {
+                        let (area, perim) = union_area_perimeter(rects);
+                        c.cumulative_area += area;
+                        c.cumulative_perimeter += perim;
+                        if *layer == stage {
+                            c.layer_area = area;
+                            c.layer_perimeter = perim;
+                        }
+                    }
+                }
+                (gates, c)
+            })
+            .collect()
+    }
+
     /// What the gate anchored at `anchor` has collected at each stage.
     ///
     /// Returns one entry per routing layer in [`WireGraph::layers`], ascending.
+    #[cfg(test)]
     pub fn collected_by_stage(&self, anchor: usize) -> Vec<(i64, Collected)> {
         self.layers
             .iter()

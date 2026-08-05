@@ -8,15 +8,24 @@
 //! The graph walk that *produces* these inputs is tested separately in `src/graph.rs`.
 
 use std::collections::BTreeMap;
-use vyges_ant::{
-    check_net, GateExposure, LayerRules, NetAntenna, Pwl, Ratio, StageMetal, Violation,
-};
+use vyges_ant::{check_net, LayerRules, NetAntenna, Pwl, Ratio, RegionExposure, Violation};
 
-/// A stage: metal this gate has collected by the time `layer` is deposited.
-fn stage(layer: &str, n: i64, area: f64, side: f64, cum: f64, cum_side: f64) -> StageMetal {
-    StageMetal {
+/// One conductor at one stage: the gates on it (summed area) and the metal they share.
+fn region(
+    layer: &str,
+    n: i64,
+    pins: &[&str],
+    gate_area: f64,
+    area: f64,
+    side: f64,
+    cum: f64,
+    cum_side: f64,
+) -> RegionExposure {
+    RegionExposure {
         layer: layer.into(),
         layer_number: n,
+        pins: pins.iter().map(|p| (*p).to_string()).collect(),
+        gate_area_um2: gate_area,
         area_um2: area,
         side_area_um2: side,
         cum_area_um2: cum,
@@ -24,12 +33,8 @@ fn stage(layer: &str, n: i64, area: f64, side: f64, cum: f64, cum_side: f64) -> 
     }
 }
 
-fn gate(pin: &str, gate_area: f64, stages: Vec<StageMetal>) -> GateExposure {
-    GateExposure { pin: pin.into(), gate_area_um2: gate_area, stages }
-}
-
-fn net(gates: Vec<GateExposure>, diff: f64) -> NetAntenna {
-    NetAntenna { net: "n".into(), diff_area_um2: diff, gates, gates_unanchored: 0 }
+fn net(regions: Vec<RegionExposure>, diff: f64) -> NetAntenna {
+    NetAntenna { net: "n".into(), diff_area_um2: diff, regions, gates_unanchored: 0 }
 }
 
 fn rules(pairs: Vec<(&str, LayerRules)>) -> BTreeMap<String, LayerRules> {
@@ -54,10 +59,10 @@ fn par_flags_only_above_the_limit() {
 
     // 100 µm² over a 10 µm² gate = 10.0, exactly at the limit. `>` not `>=`: a gate at the
     // stated limit is legal, and rounding a boundary case into a violation is a false alarm.
-    let at = net(vec![gate("u1/A", 10.0, vec![stage("met1", 1, 100.0, 0.0, 100.0, 0.0)])], 0.0);
+    let at = net(vec![region("met1", 1, &["u1/A"], 10.0, 100.0, 0.0, 100.0, 0.0)], 0.0);
     assert!(check(&at, &r).is_empty(), "a gate exactly at the limit must pass");
 
-    let over = net(vec![gate("u1/A", 10.0, vec![stage("met1", 1, 100.1, 0.0, 100.1, 0.0)])], 0.0);
+    let over = net(vec![region("met1", 1, &["u1/A"], 10.0, 100.1, 0.0, 100.1, 0.0)], 0.0);
     let v = check(&over, &r);
     assert_eq!(v.len(), 1);
     assert_eq!(v[0].ratio, Ratio::Par);
@@ -73,14 +78,10 @@ fn car_catches_what_par_cannot() {
         ("met2", LayerRules { valid: true, par: 10.0, car: 15.0, ..Default::default() }),
     ]);
     let n = net(
-        vec![gate(
-            "u1/A",
-            1.0,
-            vec![
-                stage("met1", 1, 9.0, 0.0, 9.0, 0.0),  // 9x partial, 9x cumulative
-                stage("met2", 2, 9.0, 0.0, 18.0, 0.0), // 9x partial, 18x cumulative
-            ],
-        )],
+        vec![
+            region("met1", 1, &["u1/A"], 1.0, 9.0, 0.0, 9.0, 0.0), // 9x partial, 9x cumulative
+            region("met2", 2, &["u1/A"], 1.0, 9.0, 0.0, 18.0, 0.0), // 9x partial, 18x cumulative
+        ],
         0.0,
     );
     let v = check(&n, &r);
@@ -100,14 +101,10 @@ fn unruled_layers_still_count_toward_car_above_them() {
         ("met2", LayerRules { valid: true, par: 100.0, car: 15.0, ..Default::default() }),
     ]);
     let n = net(
-        vec![gate(
-            "u1/A",
-            1.0,
-            vec![
-                stage("met1", 1, 10.0, 0.0, 10.0, 0.0),
-                stage("met2", 2, 8.0, 0.0, 18.0, 0.0), // met1's 10 is inside this 18
-            ],
-        )],
+        vec![
+            region("met1", 1, &["u1/A"], 1.0, 10.0, 0.0, 10.0, 0.0),
+            region("met2", 2, &["u1/A"], 1.0, 8.0, 0.0, 18.0, 0.0), // met1's 10 is inside 18
+        ],
         0.0,
     );
     let v = check(&n, &r);
@@ -120,7 +117,7 @@ fn unruled_layers_still_count_toward_car_above_them() {
 #[test]
 fn invalid_rules_are_not_applied() {
     let r = rules(vec![("met1", LayerRules { valid: false, par: 0.001, ..Default::default() })]);
-    let n = net(vec![gate("u1/A", 1.0, vec![stage("met1", 1, 1000.0, 0.0, 1000.0, 0.0)])], 0.0);
+    let n = net(vec![region("met1", 1, &["u1/A"], 1.0, 1000.0, 0.0, 1000.0, 0.0)], 0.0);
     assert!(check(&n, &r).is_empty());
 }
 
@@ -129,7 +126,7 @@ fn invalid_rules_are_not_applied() {
 #[test]
 fn no_gate_area_yields_no_verdict() {
     let r = rules(vec![("met1", m1_par_only())]);
-    let n = net(vec![gate("u1/A", 0.0, vec![stage("met1", 1, 1e6, 0.0, 1e6, 0.0)])], 0.0);
+    let n = net(vec![region("met1", 1, &["u1/A"], 0.0, 1e6, 0.0, 1e6, 0.0)], 0.0);
     assert!(check(&n, &r).is_empty());
     assert_eq!(LayerRules::exceeds(10.0, 1e6, 0.0), None);
 }
@@ -140,10 +137,10 @@ fn no_gate_area_yields_no_verdict() {
 fn side_ratios_skipped_when_thickness_unknown() {
     let r =
         rules(vec![("met1", LayerRules { valid: true, psr: 1.0, csr: 1.0, ..Default::default() })]);
-    let unknown = net(vec![gate("u1/A", 1.0, vec![stage("met1", 1, 5.0, 0.0, 5.0, 0.0)])], 0.0);
+    let unknown = net(vec![region("met1", 1, &["u1/A"], 1.0, 5.0, 0.0, 5.0, 0.0)], 0.0);
     assert!(check(&unknown, &r).is_empty(), "must not pass a ratio it could not compute");
 
-    let known = net(vec![gate("u1/A", 1.0, vec![stage("met1", 1, 5.0, 2.0, 5.0, 2.0)])], 0.0);
+    let known = net(vec![region("met1", 1, &["u1/A"], 1.0, 5.0, 2.0, 5.0, 2.0)], 0.0);
     let v = check(&known, &r);
     assert_eq!(v.len(), 2, "PSR and CSR both exceed 1.0: {v:?}");
     assert!(v.iter().any(|x| x.ratio == Ratio::Psr));
@@ -158,36 +155,58 @@ fn undeclared_limits_never_fire() {
     assert_eq!(LayerRules::exceeds(10.0, 101.0, 10.0), Some(10.1));
 }
 
-// ---- per-gate attribution ------------------------------------------------------------------
+// ---- per-region attribution ----------------------------------------------------------------
 
-/// **The regression this exists to prevent**, in both halves.
+/// **The regression this exists to prevent.** A verdict belongs to a CONDUCTOR, not to a net
+/// and not to a lone gate.
 ///
-/// Each gate is judged on its OWN denominator and its OWN collected metal. Correlating against
-/// OpenROAD `check_antennas` caught both errors: summing the net's gate areas hid 68 of 73
-/// violating nets, and charging the net's whole per-layer metal to every gate invented
-/// thousands that were not real.
+/// Two errors were found by correlating against OpenROAD `check_antennas`, in opposite
+/// directions. Summing gate areas across a whole net regardless of connectivity hid 68 of 73
+/// violating nets. Charging each gate its own area, ignoring the others sharing its conductor,
+/// over-reported by the gate count — exactly 2.00x on two-gate regions.
 #[test]
-fn each_gate_is_judged_on_its_own_metal_and_its_own_area() {
+fn separate_conductors_are_judged_separately() {
     let r = rules(vec![("met1", m1_par_only())]); // PAR limit 10.0
     // Two gates on one net, on different branches: one collected 200 µm², the other 20.
     let n = net(
         vec![
-            gate("big/A", 10.0, vec![stage("met1", 1, 200.0, 0.0, 200.0, 0.0)]),
-            gate("small/A", 10.0, vec![stage("met1", 1, 20.0, 0.0, 20.0, 0.0)]),
+            region("met1", 1, &["big/A"], 10.0, 200.0, 0.0, 200.0, 0.0),
+            region("met1", 1, &["small/A"], 10.0, 20.0, 0.0, 20.0, 0.0),
         ],
         0.0,
     );
     let v = check(&n, &r);
-    assert_eq!(v.len(), 1, "only the gate on the big branch violates: {v:?}");
+    assert_eq!(v.len(), 1, "only the conductor with the big branch violates: {v:?}");
     assert_eq!(v[0].pin, "big/A");
-    assert!((v[0].value - 20.0).abs() < 1e-9, "200/10 — this gate's metal, not the net's total");
+    assert!((v[0].value - 20.0).abs() < 1e-9, "200/10 — this conductor's metal");
+}
 
-    // Same collected metal, a smaller gate: the denominator is that pin's own.
-    let n2 = net(vec![gate("tiny/A", 1.0, vec![stage("met1", 1, 20.0, 0.0, 20.0, 0.0)])], 0.0);
-    let v2 = check(&n2, &r);
-    assert_eq!(v2.len(), 1);
-    assert!((v2[0].value - 20.0).abs() < 1e-9);
-    assert_eq!(v2[0].gate_area_um2, 1.0);
+/// Gates sharing a conductor share its charge, so the denominator is their SUM and every one of
+/// them gets the same verdict. Charging each its own area was measured at exactly 2.00x too
+/// high on two-gate regions; OpenROAD's own accumulation is `iterm_gate_area += gateArea(...)`
+/// over the gates of a node.
+#[test]
+fn gates_sharing_a_conductor_share_its_charge() {
+    let r = rules(vec![("met1", m1_par_only())]); // PAR limit 10.0
+    // 300 µm² over two 20 µm² gates = 7.5, under the limit. Charging one gate alone gives 15.
+    let shared = net(
+        vec![region("met1", 1, &["a/A", "b/A"], 40.0, 300.0, 0.0, 300.0, 0.0)],
+        0.0,
+    );
+    assert!(check(&shared, &r).is_empty(), "the pair shares the charge, so 300/40 = 7.5");
+
+    // The same metal on a conductor with only one of those gates does violate.
+    let alone = net(vec![region("met1", 1, &["a/A"], 20.0, 300.0, 0.0, 300.0, 0.0)], 0.0);
+    let v = check(&alone, &r);
+    assert_eq!(v.len(), 1);
+    assert!((v[0].value - 15.0).abs() < 1e-9);
+
+    // Every gate on a violating conductor is named — one verdict, reported per pin.
+    let both = net(vec![region("met1", 1, &["a/A", "b/A"], 20.0, 300.0, 0.0, 300.0, 0.0)], 0.0);
+    let v2 = check(&both, &r);
+    assert_eq!(v2.len(), 2, "one verdict, echoed for each gate at risk");
+    assert_eq!(v2[0].value, v2[1].value);
+    assert_eq!(vec![v2[0].pin.as_str(), v2[1].pin.as_str()], vec!["a/A", "b/A"]);
 }
 
 // ---- diffusion-dependent limits ------------------------------------------------------------
@@ -247,9 +266,7 @@ fn diffusion_raises_the_limit_and_can_clear_a_violation() {
         "met1",
         LayerRules { valid: true, diff_psr: sky130_diff_psr(), ..Default::default() },
     )]);
-    let stages = vec![stage("met1", 1, 0.0, 1000.0, 0.0, 1000.0)];
-
-    let bare = net(vec![gate("u1/A", 1.0, stages.clone())], 0.0);
+    let bare = net(vec![region("met1", 1, &["u1/A"], 1.0, 0.0, 1000.0, 0.0, 1000.0)], 0.0);
     let v = check(&bare, &r);
     // Exactly one violation, PSR — *not* two. sky130 states no CSR limit in either form, so the
     // cumulative side-area ratio is genuinely unchecked there, and firing on it would be
@@ -260,7 +277,7 @@ fn diffusion_raises_the_limit_and_can_clear_a_violation() {
     assert_eq!(v[0].diff_area_um2, 0.0);
 
     // The same metal on a net with 22.5 µm² of diffusion is under the 11600 limit.
-    let diode = net(vec![gate("u1/A", 1.0, stages)], 22.5);
+    let diode = net(vec![region("met1", 1, &["u1/A"], 1.0, 0.0, 1000.0, 0.0, 1000.0)], 22.5);
     assert!(check(&diode, &r).is_empty(), "diffusion must raise the limit enough to clear this");
 }
 
@@ -272,7 +289,7 @@ fn a_layer_with_only_a_diff_curve_is_checked() {
     assert!(only_curve.has_any_limit(), "isValid() is false, yet there IS a limit here");
 
     let r = rules(vec![("met1", only_curve)]);
-    let n = net(vec![gate("u1/A", 1.0, vec![stage("met1", 1, 0.0, 500.0, 0.0, 500.0)])], 0.0);
+    let n = net(vec![region("met1", 1, &["u1/A"], 1.0, 0.0, 500.0, 0.0, 500.0)], 0.0);
     assert!(!check(&n, &r).is_empty(), "500 > 400 must be caught");
 }
 
