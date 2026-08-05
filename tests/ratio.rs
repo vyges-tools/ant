@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use vyges_ant::{check_net, LayerRules, NetAntenna, Pwl, Ratio, RegionExposure, Violation};
 
 /// One conductor at one stage: the gates on it (summed area) and the metal they share.
+#[allow(clippy::too_many_arguments)]
 fn region(
     layer: &str,
     n: i64,
@@ -21,11 +22,28 @@ fn region(
     cum: f64,
     cum_side: f64,
 ) -> RegionExposure {
+    region_diff(layer, n, pins, gate_area, 0.0, area, side, cum, cum_side)
+}
+
+/// A conductor carrying its own diffusion — the limit is indexed per conductor, not per net.
+#[allow(clippy::too_many_arguments)]
+fn region_diff(
+    layer: &str,
+    n: i64,
+    pins: &[&str],
+    gate_area: f64,
+    diff: f64,
+    area: f64,
+    side: f64,
+    cum: f64,
+    cum_side: f64,
+) -> RegionExposure {
     RegionExposure {
         layer: layer.into(),
         layer_number: n,
         pins: pins.iter().map(|p| (*p).to_string()).collect(),
         gate_area_um2: gate_area,
+        diff_area_um2: diff,
         area_um2: area,
         side_area_um2: side,
         cum_area_um2: cum,
@@ -266,7 +284,7 @@ fn diffusion_raises_the_limit_and_can_clear_a_violation() {
         "met1",
         LayerRules { valid: true, diff_psr: sky130_diff_psr(), ..Default::default() },
     )]);
-    let bare = net(vec![region("met1", 1, &["u1/A"], 1.0, 0.0, 1000.0, 0.0, 1000.0)], 0.0);
+    let bare = net(vec![region_diff("met1", 1, &["u1/A"], 1.0, 0.0, 0.0, 1000.0, 0.0, 1000.0)], 0.0);
     let v = check(&bare, &r);
     // Exactly one violation, PSR — *not* two. sky130 states no CSR limit in either form, so the
     // cumulative side-area ratio is genuinely unchecked there, and firing on it would be
@@ -277,7 +295,8 @@ fn diffusion_raises_the_limit_and_can_clear_a_violation() {
     assert_eq!(v[0].diff_area_um2, 0.0);
 
     // The same metal on a net with 22.5 µm² of diffusion is under the 11600 limit.
-    let diode = net(vec![region("met1", 1, &["u1/A"], 1.0, 0.0, 1000.0, 0.0, 1000.0)], 22.5);
+    let diode =
+        net(vec![region_diff("met1", 1, &["u1/A"], 1.0, 22.5, 0.0, 1000.0, 0.0, 1000.0)], 22.5);
     assert!(check(&diode, &r).is_empty(), "diffusion must raise the limit enough to clear this");
 }
 
@@ -298,4 +317,34 @@ fn a_layer_with_only_a_diff_curve_is_checked() {
 #[test]
 fn a_layer_with_nothing_stated_has_no_limit() {
     assert!(!LayerRules::default().has_any_limit());
+}
+
+/// **The recall regression this exists to prevent.** The limit is indexed by the conductor's
+/// own diffusion, never the net's total.
+///
+/// A net-wide total is never smaller than one conductor's share, so using it sets the bar too
+/// high and real violations slip under. Measured against OpenROAD, that was the whole of the
+/// remaining recall gap: every limit disagreement had our limit above theirs.
+#[test]
+fn the_limit_uses_this_conductors_diffusion_not_the_nets() {
+    let r = rules(vec![(
+        "met1",
+        LayerRules { valid: true, diff_psr: sky130_diff_psr(), ..Default::default() },
+    )]);
+    // Two conductors on one net. One carries a diode's 22.5 µm² of diffusion; the other carries
+    // none. Both see 1000 µm² of side area over a 1 µm² gate, a ratio of 1000.
+    let n = NetAntenna {
+        net: "n".into(),
+        diff_area_um2: 22.5, // the NET total — must not be what either conductor is judged by
+        regions: vec![
+            region_diff("met1", 1, &["protected/A"], 1.0, 22.5, 0.0, 1000.0, 0.0, 1000.0),
+            region_diff("met1", 1, &["bare/A"], 1.0, 0.0, 0.0, 1000.0, 0.0, 1000.0),
+        ],
+        gates_unanchored: 0,
+    };
+    let v = check(&n, &r);
+    assert_eq!(v.len(), 1, "only the undiodéd conductor violates: {v:?}");
+    assert_eq!(v[0].pin, "bare/A");
+    assert!((v[0].limit - 400.0).abs() < 1e-9, "limit at zero diffusion, not at the net's 22.5");
+    assert_eq!(v[0].diff_area_um2, 0.0);
 }

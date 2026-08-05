@@ -153,8 +153,14 @@ pub struct RegionExposure {
     /// The gates on this conductor. They all see the same metal, so they share one verdict;
     /// naming them keeps the report actionable rather than anonymous.
     pub pins: Vec<String>,
-    /// Sum of the gate areas of `pins` — the ratio's denominator.
+    /// Sum of the gate areas on this conductor — the ratio's denominator.
     pub gate_area_um2: f64,
+    /// Diffusion area on **this conductor** — the index into the diff-ratio curves.
+    ///
+    /// Per conductor, not per net. Diffusion elsewhere on the net has not yet drained into this
+    /// one at this stage, and a net-wide total is never smaller, so using it sets the limit too
+    /// high and lets violations slip under. Matches OpenROAD's per-node `iterm_diff_area`.
+    pub diff_area_um2: f64,
     /// Metal on this layer alone, reachable within the region (the PAR numerator).
     pub area_um2: f64,
     /// Perimeter × layer thickness. Zero when the LEF states no thickness — in which case the
@@ -168,10 +174,12 @@ pub struct RegionExposure {
 #[derive(Debug, Clone, Serialize)]
 pub struct NetAntenna {
     pub net: String,
-    /// Diffusion area on the net (µm²) — the index into the diff-ratio curves. More diffusion
-    /// means a higher permitted ratio, which is exactly how a protection diode earns relief.
+    /// Diffusion over the whole net (µm²). **Informational only** — the limit is indexed by
+    /// each conductor's own diffusion ([`RegionExposure::diff_area_um2`]), since diffusion
+    /// elsewhere on the net has not drained into this conductor yet. Kept because the
+    /// difference between the two is exactly what `explain` exists to show.
     pub diff_area_um2: f64,
-    /// Every (region, stage) pair carrying at least one gate.
+    /// Every (region, stage) pair carrying at least one terminal.
     pub regions: Vec<RegionExposure>,
     /// Pins with a gate area that could not be anchored to the routing (unplaced, or sitting
     /// over no metal). Reported rather than dropped: an unanchored gate is unchecked, and
@@ -228,9 +236,12 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
         })
         .collect();
 
-    // Gates and their anchors, plus the net-wide diffusion that indexes the limit curves.
+    // EVERY terminal is anchored, not only the gates: diffusion accumulates over a conductor's
+    // terminals, and a diode's pin carries diffusion without carrying a gate. Anchoring gates
+    // alone would leave each conductor's diffusion invisible.
     let mut pins: Vec<String> = Vec::new();
     let mut gate_areas: Vec<f64> = Vec::new();
+    let mut diff_areas: Vec<f64> = Vec::new();
     let mut anchors: Vec<usize> = Vec::new();
     let mut gates_unanchored = 0usize;
     let mut diff_area_um2 = 0.0f64;
@@ -243,25 +254,28 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
         if master.is_empty() {
             continue;
         }
-        // Diffusion drains charge wherever it sits on the net, so it accumulates net-wide.
-        diff_area_um2 += db.mterm_antenna_diff_area(&master, pin);
-
         let gate = db.mterm_antenna_gate_area(&master, pin);
-        if gate <= 0.0 {
-            continue; // not a gate: no denominator, nothing to check
+        let diff = db.mterm_antenna_diff_area(&master, pin);
+        diff_area_um2 += diff;
+        if gate <= 0.0 && diff <= 0.0 {
+            continue; // contributes to neither side of the ratio
         }
-        // Anchor the gate to the metal it touches. Without a location we cannot say which
-        // conductor it is on, and guessing would attribute someone else's metal to it.
-        let anchored = db
-            .iterm_avg_xy(inst, pin)
-            .and_then(|(x, y)| graph.anchor(x, y));
-        match anchored {
+        // Anchor to the metal it touches. Without a location we cannot say which conductor it
+        // is on, and guessing would attribute someone else's metal or diffusion to it.
+        match db.iterm_avg_xy(inst, pin).and_then(|(x, y)| graph.anchor(x, y)) {
             Some(a) => {
                 pins.push(iterm.clone());
                 gate_areas.push(gate);
+                diff_areas.push(diff);
                 anchors.push(a);
             }
-            None => gates_unanchored += 1,
+            // Only a lost GATE means a gate went unchecked; lost diffusion is a missing
+            // relief, which is conservative rather than silent.
+            None => {
+                if gate > 0.0 {
+                    gates_unanchored += 1;
+                }
+            }
         }
     }
 
@@ -269,12 +283,20 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
     if !anchors.is_empty() {
         for (i, &stage) in graph.layers.iter().enumerate() {
             let (name, thick) = &layer_info[i];
-            for (gates, c) in graph.regions_at(stage, &anchors) {
+            for (terms, c) in graph.regions_at(stage, &anchors) {
+                // Report only the terminals that are gates — a pin with diffusion and no gate
+                // is not at risk, it is what protects the ones that are.
+                let gate_pins: Vec<String> =
+                    terms.iter().filter(|&&t| gate_areas[t] > 0.0).map(|&t| pins[t].clone()).collect();
+                if gate_pins.is_empty() {
+                    continue; // a conductor with no gate on it has nothing to damage
+                }
                 regions.push(RegionExposure {
                     layer: name.clone(),
                     layer_number: stage,
-                    gate_area_um2: gates.iter().map(|&g| gate_areas[g]).sum(),
-                    pins: gates.iter().map(|&g| pins[g].clone()).collect(),
+                    gate_area_um2: terms.iter().map(|&t| gate_areas[t]).sum(),
+                    diff_area_um2: terms.iter().map(|&t| diff_areas[t]).sum(),
+                    pins: gate_pins,
                     area_um2: c.layer_area as f64 / dbu2,
                     // Thickness of 0 means the LEF stated none; the product is then 0, which
                     // `check_net` treats as "unavailable" and skips rather than passing.
@@ -421,10 +443,10 @@ pub fn check_net(
     for rg in &net.regions {
         let Some(r) = rules.get(&rg.layer).filter(|r| r.has_any_limit()) else { continue };
         let mut test = |ratio: Ratio, area: f64| {
-            // The limit depends on the net's diffusion area when the technology states a
-            // diff-ratio curve — which is how a protection diode raises the bar rather than
-            // being invisible to the check.
-            let limit = r.limit(ratio, net.diff_area_um2);
+            // The limit is indexed by THIS conductor's diffusion when the technology states a
+            // diff-ratio curve — how a protection diode raises the bar for the gates it
+            // actually shares metal with, rather than for the whole net.
+            let limit = r.limit(ratio, rg.diff_area_um2);
             if let Some(value) = LayerRules::exceeds(limit, area, rg.gate_area_um2) {
                 for pin in &rg.pins {
                     out.push(Violation {
@@ -435,7 +457,7 @@ pub fn check_net(
                         value,
                         limit,
                         gate_area_um2: rg.gate_area_um2,
-                        diff_area_um2: net.diff_area_um2,
+                        diff_area_um2: rg.diff_area_um2,
                         metal_area_um2: area,
                     });
                 }
