@@ -41,9 +41,9 @@ const DESCRIBE: &str = r#"{
       "NOT A SIGN-OFF GATE YET, though close. Correlated against OpenROAD check_antennas on a routed sky130 block: 65 of 83 violations matched exactly, 9 unconfirmed, 64 of 66 compared values within 2%, and every shared record agreeing on the limit. 18 real violations are still missed, most on met4. Run check_antennas before a tapeout.",
       "The ratio is charged per CONDUCTOR: metal reachable from the gates over layers at or below the one being deposited, divided by the summed gate area of the gates on that conductor. Measured as the exact union of the rectangles, so overlap and abutment count once.",
       "The diffusion-dependent limit is indexed by each conductor's own diffusion, matching OpenROAD's per-node iterm_diff_area. Every terminal is anchored to a conductor, not only the gates, since a diode pin carries diffusion without carrying a gate.",
-      "Layer metal_factor / side_metal_factor multipliers are not applied, and diff_psr is not computed by OpenROAD's distinct formula (minus_diff_factor and plus_diff_protect terms scaled by the AreaDiffReduce PWL); it is that quantity, not psr, that OpenROAD compares against a diffusion PWL limit.",
-      "Diffusion area is applied net-wide, where the real limit varies per layer as the path to diffusion completes.",
+      "The ratio model matches OpenROAD's AntennaChecker formula for formula, including the LEF area/side factors, the diffusion branch with its minus_diff and gate_plus_diff relief terms, and AreaDiffReduce scaling. The remaining disagreement is pin-to-conductor ATTACHMENT: pins are matched to metal geometrically (terminal average point, nearest-shape fallback) where OpenROAD reads attachment from the routing topology, so conductors are occasionally merged that should be separate.",
       "Cut layers (mcon/via/via2) are not checked; routing layers only.",
+      "Diffusion area is applied net-wide, where the real limit varies per layer as the path to diffusion completes.",
       "A gate whose pin centre is not covered by metal anchors to the nearest shape of its own net, because the router lands on an access point rather than the reported centroid.",
       "Layer accumulation order is dbTechLayer routing level, not a manufacturing step model."
   ],

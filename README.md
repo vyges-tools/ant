@@ -83,16 +83,30 @@ Good enough that a flagged net is strong evidence and a clean run is meaningful 
 **not a sign-off gate**: 18 real violations are missed, most of them on met4. Run
 `check_antennas` before a tapeout.
 
-### What is still missing
+### What is still missing — and it is no longer the model
 
-**Cut layers are not checked.** OpenROAD evaluates `mcon`/`via`/`via2` against their own ratios;
-this engine evaluates routing layers only.
+The ratio model now matches OpenROAD's `AntennaChecker` formula for formula: per-conductor
+metal and denominator, per-conductor diffusion, the LEF area/side factors including the
+diff-use-only restriction, the diffusion branch with its `minus_diff` and `gate_plus_diff`
+relief terms, and the `AreaDiffReduce` scaling. Implementing the last of those changed the
+measured result by **nothing**, because sky130 states all of those factors as identity — worth
+knowing, and worth having for technologies that do not.
 
-**Two formula details from `AntennaChecker.cc` are not implemented**: the layer `metal_factor` /
-`side_metal_factor` multipliers, and OpenROAD's distinct `diff_psr` (`− minus_diff_factor ×
-diff_area` in the numerator, `+ plus_diff_protect` in the denominator, scaled by the
-`AreaDiffReduce` PWL) — and it is `diff_psr`, not `psr`, that OpenROAD compares against a
-diffusion PWL limit. These are the leading candidates for the 18 misses.
+**The residual is pin-to-conductor attachment.** This engine matches a pin to the metal it
+touches *geometrically* — the terminal's average point, falling back to the nearest shape of the
+same net. OpenROAD does not guess: it reads the attachment from the routing topology
+(`dbWireGraph::Node::object()`).
+
+Where the heuristic errs it merges conductors that should be separate. Measured on one missed
+violation: we place a gate and its protection diode on one conductor, giving a denominator of
+1.4247 µm² and a diffusion-lifted limit of ~2774, so the net passes at 371.6. OpenROAD's node
+holds the gate alone — denominator 0.99, limit 400 — and 529.40 / 0.99 = 534.7 against its
+reported 535.1. Same metal, same formula, different conductor.
+
+Closing it means binding the wire graph's node/terminal attachment instead of matching geometry.
+
+**Cut layers are also unchecked** (`mcon`/`via`/`via2` have their own ratios). Not a cause of the
+misses here — every violation in the golden report is on a routing layer — but a real gap.
 
 ### How the model was arrived at
 
@@ -108,6 +122,9 @@ Worth stating because two plausible models were wrong first:
 4. **Index the limit by each conductor's own diffusion, not the net's total.** A net-wide total
    is never smaller, so the bar sat too high and real violations slipped under. Fixing it took
    exact matches from 37 to 65 and removed *every* limit disagreement.
+5. **Implement the exact factor and diffusion-branch formulas.** Changed the measured result by
+   nothing on sky130, where every factor is identity — which is how we learned the residual was
+   not in the model at all.
 
 A separate hypothesis — that summing rectangle perimeters instead of unioning them was the
 dominant error — was implemented exactly and **rejected by measurement**: it changed the result
