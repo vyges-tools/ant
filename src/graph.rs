@@ -171,19 +171,17 @@ impl WireGraph {
         let mut hits: Vec<usize> = Vec::new();
         for pb in pin_boxes {
             for (i, s) in self.shapes.iter().enumerate() {
-                if s.is_via || s.layer < 0 {
-                    continue;
-                }
-                // Routing levels are not consecutive integers in odb (cut layers sit between),
-                // so "adjacent" is by position in this net's layer list, not by number.
-                let adjacent = self
-                    .layers
-                    .iter()
-                    .position(|&l| l == pb.layer)
-                    .zip(self.layers.iter().position(|&l| l == s.layer))
-                    .map(|(a, b)| a.abs_diff(b) <= 1)
-                    .unwrap_or(false);
-                if adjacent && s.touches(pb) && !hits.contains(&i) {
+                // On the pin's own layer it is direct metal; a VIA counts when either of the
+                // layers it joins is the pin's. Vias are the usual case, not the exception: a
+                // standard-cell pin sits on the lowest routing layer and the route reaches it
+                // through the cut landing on top. Excluding them left 8321 of ~10000 gates
+                // attached to nothing.
+                let on_pin_layer = if s.is_via {
+                    s.via_bottom == pb.layer || s.via_top == pb.layer
+                } else {
+                    s.layer == pb.layer
+                };
+                if on_pin_layer && s.touches(pb) && !hits.contains(&i) {
                     hits.push(i);
                 }
             }
@@ -221,6 +219,16 @@ impl WireGraph {
                 (dx * dx + dy * dy, s.layer)
             })
             .map(|(i, _)| i)
+    }
+
+    /// Does this shape exist yet at `stage`? A via needs its upper layer to have been cut.
+    fn live_at(&self, i: usize, stage: i64) -> bool {
+        let s = &self.shapes[i];
+        if s.is_via {
+            s.via_bottom >= 0 && s.via_top <= stage
+        } else {
+            s.layer >= 0 && s.layer <= stage
+        }
     }
 
     /// Connected components of the routing as it exists at `stage` — shapes on layers ≤ stage,
@@ -283,11 +291,7 @@ impl WireGraph {
         // A pin SHORTS the routing it touches: two wires landing on one pin are one conductor.
         // Only shapes that exist at this stage participate, so the shorting is staged too.
         for touched in attach {
-            let live: Vec<usize> = touched
-                .iter()
-                .copied()
-                .filter(|&i| self.shapes[i].layer >= 0 && self.shapes[i].layer <= stage)
-                .collect();
+            let live: Vec<usize> = touched.iter().copied().filter(|&i| self.live_at(i, stage)).collect();
             for w in live.windows(2) {
                 uf.union(w[0] as u32, w[1] as u32);
             }
@@ -297,9 +301,7 @@ impl WireGraph {
         for (g, touched) in attach.iter().enumerate() {
             // The terminal belongs to whichever conductor its live contacts are on. They are
             // one set after the shorting above, so the first live contact identifies it.
-            if let Some(&first) =
-                touched.iter().find(|&&i| self.shapes[i].layer >= 0 && self.shapes[i].layer <= stage)
-            {
+            if let Some(&first) = touched.iter().find(|&&i| self.live_at(i, stage)) {
                 by_root.entry(uf.find(first as u32)).or_default().push(g);
             }
         }
@@ -553,8 +555,21 @@ mod tests {
         let g = WireGraph::new(vec![metal(1, 0, 100), metal(2, 200, 300)]);
         // Overlaps the layer-1 wire.
         assert_eq!(g.touched_by(&[pinbox(1, 50, 60)]), vec![0]);
-        // Adjacent layer, overlapping in plan: counts.
-        assert_eq!(g.touched_by(&[pinbox(1, 250, 260)]), vec![1]);
+        // A layer-2 wire is not the pin's metal and no via joins them here.
+        assert!(g.touched_by(&[pinbox(1, 250, 260)]).is_empty());
+    }
+
+    /// The usual case: a pin on the lowest routing layer reached by the via landing on it.
+    /// Excluding vias left almost every gate attached to nothing.
+    #[test]
+    fn a_pin_attaches_through_the_via_that_lands_on_it() {
+        let g = WireGraph::new(vec![metal(2, 0, 100), via(1, 2, 10)]);
+        let touched = g.touched_by(&[pinbox(1, 8, 20)]);
+        assert_eq!(touched, vec![1], "the via joining layer 1 to layer 2");
+        // At stage 2 the via is cut, so the pin reaches the layer-2 wire.
+        let regions = g.regions_at(2, &[touched]);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].1.layer_area, 1000);
     }
 
     /// **No proximity fallback.** A pin whose metal touches no routing is attached to nothing.
