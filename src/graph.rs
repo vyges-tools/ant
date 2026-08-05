@@ -158,6 +158,39 @@ impl WireGraph {
         self.shapes.is_empty()
     }
 
+    /// Shapes a pin physically touches: routing on the pin's own layer, or on the layer
+    /// immediately above or below, that intersects one of the pin's boxes.
+    ///
+    /// This is OpenROAD's `saveGates` rule. Same-layer contact is direct metal; the adjacent
+    /// layers catch the via landing on the pin, which is how most standard-cell pins reach the
+    /// route. Nothing else counts — **there is no proximity fallback**, because a pin that
+    /// touches no routing is genuinely attached to nothing, and guessing merges conductors that
+    /// are electrically separate. Measured cost of guessing: a gate and its protection diode
+    /// landed on one conductor, and a real violation was suppressed.
+    pub fn touched_by(&self, pin_boxes: &[WireShape]) -> Vec<usize> {
+        let mut hits: Vec<usize> = Vec::new();
+        for pb in pin_boxes {
+            for (i, s) in self.shapes.iter().enumerate() {
+                if s.is_via || s.layer < 0 {
+                    continue;
+                }
+                // Routing levels are not consecutive integers in odb (cut layers sit between),
+                // so "adjacent" is by position in this net's layer list, not by number.
+                let adjacent = self
+                    .layers
+                    .iter()
+                    .position(|&l| l == pb.layer)
+                    .zip(self.layers.iter().position(|&l| l == s.layer))
+                    .map(|(a, b)| a.abs_diff(b) <= 1)
+                    .unwrap_or(false);
+                if adjacent && s.touches(pb) && !hits.contains(&i) {
+                    hits.push(i);
+                }
+            }
+        }
+        hits
+    }
+
     /// Index of the shape where a pin meets the metal.
     ///
     /// Containment first, on the lowest layer that covers the point: a pin connects at the
@@ -244,11 +277,31 @@ impl WireGraph {
     /// summed gate area of the region. Measured against OpenROAD on one net: our region metal
     /// of 1603.33 µm² over the region's three gates (0.4347 + 0.4347 + 0.126 = 0.9954) gives
     /// 1610.7 against their 1611.2 — 0.03%. Charging each gate its own area instead gave 7.9×.
-    pub fn regions_at(&self, stage: i64, anchors: &[usize]) -> Vec<(Vec<usize>, Collected)> {
+    pub fn regions_at(&self, stage: i64, attach: &[Vec<usize>]) -> Vec<(Vec<usize>, Collected)> {
         let mut uf = self.components_at(stage);
+
+        // A pin SHORTS the routing it touches: two wires landing on one pin are one conductor.
+        // Only shapes that exist at this stage participate, so the shorting is staged too.
+        for touched in attach {
+            let live: Vec<usize> = touched
+                .iter()
+                .copied()
+                .filter(|&i| self.shapes[i].layer >= 0 && self.shapes[i].layer <= stage)
+                .collect();
+            for w in live.windows(2) {
+                uf.union(w[0] as u32, w[1] as u32);
+            }
+        }
+
         let mut by_root: HashMap<u32, Vec<usize>> = HashMap::new();
-        for (g, &a) in anchors.iter().enumerate() {
-            by_root.entry(uf.find(a as u32)).or_default().push(g);
+        for (g, touched) in attach.iter().enumerate() {
+            // The terminal belongs to whichever conductor its live contacts are on. They are
+            // one set after the shorting above, so the first live contact identifies it.
+            if let Some(&first) =
+                touched.iter().find(|&&i| self.shapes[i].layer >= 0 && self.shapes[i].layer <= stage)
+            {
+                by_root.entry(uf.find(first as u32)).or_default().push(g);
+            }
         }
         // Shapes of each conductor, per layer, for the union measure.
         let mut shapes_by_root: HashMap<u32, HashMap<i64, Vec<(i32, i32, i32, i32)>>> =
@@ -294,6 +347,8 @@ impl WireGraph {
     /// Returns one entry per routing layer in [`WireGraph::layers`], ascending.
     #[cfg(test)]
     pub fn collected_by_stage(&self, anchor: usize) -> Vec<(i64, Collected)> {
+        // Test helper: one terminal touching exactly the given shape.
+        let _ = &anchor;
         self.layers
             .iter()
             .map(|&stage| {
@@ -487,6 +542,58 @@ mod tests {
     }
 
     /// With nothing routed there is nothing to anchor to.
+    fn pinbox(layer: i64, x0: i32, x1: i32) -> WireShape {
+        WireShape { layer, x0, y0: 0, x1, y1: 4, is_via: false, via_bottom: -1, via_top: -1 }
+    }
+
+    /// A pin attaches to the routing its own metal touches — same layer, or the one either
+    /// side of it (which is how a via landing on the pin counts).
+    #[test]
+    fn a_pin_attaches_to_what_its_boxes_touch() {
+        let g = WireGraph::new(vec![metal(1, 0, 100), metal(2, 200, 300)]);
+        // Overlaps the layer-1 wire.
+        assert_eq!(g.touched_by(&[pinbox(1, 50, 60)]), vec![0]);
+        // Adjacent layer, overlapping in plan: counts.
+        assert_eq!(g.touched_by(&[pinbox(1, 250, 260)]), vec![1]);
+    }
+
+    /// **No proximity fallback.** A pin whose metal touches no routing is attached to nothing.
+    /// Guessing the nearest wire merged a gate with its protection diode on a real block and
+    /// suppressed a violation.
+    #[test]
+    fn a_pin_touching_nothing_attaches_to_nothing() {
+        let g = WireGraph::new(vec![metal(1, 0, 100)]);
+        assert!(g.touched_by(&[pinbox(1, 500, 520)]).is_empty());
+    }
+
+    /// A pin shorts the wires it lands on: two conductors meeting at one pin are one conductor.
+    #[test]
+    fn a_pin_shorts_the_wires_it_touches() {
+        // Two disjoint layer-1 wires, bridged only by a pin box spanning both.
+        let g = WireGraph::new(vec![metal(1, 0, 50), metal(1, 100, 150)]);
+        let touched = g.touched_by(&[pinbox(1, 0, 150)]);
+        assert_eq!(touched.len(), 2, "the pin lands on both");
+        let regions = g.regions_at(1, &[touched]);
+        assert_eq!(regions.len(), 1, "one conductor, not two");
+        // 50x10 + 50x10 of metal, both charged to the terminal on them.
+        assert_eq!(regions[0].1.layer_area, 1000);
+    }
+
+    /// Terminals on genuinely separate conductors stay separate — the case that was being
+    /// merged by proximity.
+    #[test]
+    fn separate_conductors_stay_separate() {
+        let g = WireGraph::new(vec![metal(1, 0, 50), metal(1, 100, 150)]);
+        let a = g.touched_by(&[pinbox(1, 10, 20)]);
+        let b = g.touched_by(&[pinbox(1, 110, 120)]);
+        let regions = g.regions_at(1, &[a, b]);
+        assert_eq!(regions.len(), 2, "two pins, two conductors");
+        for (terms, c) in &regions {
+            assert_eq!(terms.len(), 1);
+            assert_eq!(c.layer_area, 500, "each sees only its own wire");
+        }
+    }
+
     #[test]
     fn a_net_with_no_routing_has_no_anchor() {
         let g = WireGraph::new(vec![]);

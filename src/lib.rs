@@ -242,7 +242,7 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
     let mut pins: Vec<String> = Vec::new();
     let mut gate_areas: Vec<f64> = Vec::new();
     let mut diff_areas: Vec<f64> = Vec::new();
-    let mut anchors: Vec<usize> = Vec::new();
+    let mut attach: Vec<Vec<usize>> = Vec::new();
     let mut gates_unanchored = 0usize;
     let mut diff_area_um2 = 0.0f64;
 
@@ -260,30 +260,29 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
         if gate <= 0.0 && diff <= 0.0 {
             continue; // contributes to neither side of the ratio
         }
-        // Anchor to the metal it touches. Without a location we cannot say which conductor it
-        // is on, and guessing would attribute someone else's metal or diffusion to it.
-        match db.iterm_avg_xy(inst, pin).and_then(|(x, y)| graph.anchor(x, y)) {
-            Some(a) => {
-                pins.push(iterm.clone());
-                gate_areas.push(gate);
-                diff_areas.push(diff);
-                anchors.push(a);
+        // Attach by the pin's OWN metal, not by proximity: the conductor a terminal joins is
+        // the routing its boxes actually touch. Guessing merges conductors that are separate,
+        // which both inflates a denominator and lends diffusion that is not there.
+        let touched = graph.touched_by(&db.iterm_pin_boxes(inst, pin));
+        if touched.is_empty() {
+            // Only a lost GATE means a gate went unchecked; lost diffusion is a missing relief,
+            // which is conservative rather than silent.
+            if gate > 0.0 {
+                gates_unanchored += 1;
             }
-            // Only a lost GATE means a gate went unchecked; lost diffusion is a missing
-            // relief, which is conservative rather than silent.
-            None => {
-                if gate > 0.0 {
-                    gates_unanchored += 1;
-                }
-            }
+            continue;
         }
+        pins.push(iterm.clone());
+        gate_areas.push(gate);
+        diff_areas.push(diff);
+        attach.push(touched);
     }
 
     let mut regions: Vec<RegionExposure> = Vec::new();
-    if !anchors.is_empty() {
+    if !attach.is_empty() {
         for (i, &stage) in graph.layers.iter().enumerate() {
             let (name, thick) = &layer_info[i];
-            for (terms, c) in graph.regions_at(stage, &anchors) {
+            for (terms, c) in graph.regions_at(stage, &attach) {
                 // Report only the terminals that are gates — a pin with diffusion and no gate
                 // is not at risk, it is what protects the ones that are.
                 let gate_pins: Vec<String> =
