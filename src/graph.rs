@@ -53,6 +53,80 @@ impl UnionFind {
     }
 }
 
+/// Area and perimeter of the **union** of axis-aligned rectangles, in DBU.
+///
+/// Summing rectangles individually double-counts, and for perimeter it is much worse than for
+/// area: overlap inflates area only where shapes actually overlap, but *every* junction between
+/// abutting collinear segments contributes two interior edges that exist in no physical wire. A
+/// routed net is delivered as many small rectangles, so the inflation is systematic rather than
+/// occasional — and on technologies whose only antenna limit is a side-area ratio (sky130's
+/// `DiffPSR`), perimeter *is* the numerator.
+///
+/// Exact, by coordinate compression: the distinct x and y edges cut the plane into cells, each
+/// wholly inside or outside the union. Area is the covered cells; perimeter is every cell edge
+/// with cover on one side and not the other. No floating point, no tolerance.
+pub fn union_area_perimeter(rects: &[(i32, i32, i32, i32)]) -> (i64, i64) {
+    let rects: Vec<_> = rects.iter().filter(|r| r.2 > r.0 && r.3 > r.1).copied().collect();
+    if rects.is_empty() {
+        return (0, 0);
+    }
+    let mut xs: Vec<i32> = rects.iter().flat_map(|r| [r.0, r.2]).collect();
+    let mut ys: Vec<i32> = rects.iter().flat_map(|r| [r.1, r.3]).collect();
+    xs.sort_unstable();
+    xs.dedup();
+    ys.sort_unstable();
+    ys.dedup();
+    let (nx, ny) = (xs.len() - 1, ys.len() - 1);
+    if nx == 0 || ny == 0 {
+        return (0, 0);
+    }
+
+    let mut covered = vec![false; nx * ny];
+    for &(x0, y0, x1, y1) in &rects {
+        let i0 = xs.partition_point(|&v| v < x0);
+        let i1 = xs.partition_point(|&v| v < x1);
+        let j0 = ys.partition_point(|&v| v < y0);
+        let j1 = ys.partition_point(|&v| v < y1);
+        for i in i0..i1 {
+            for j in j0..j1 {
+                covered[i * ny + j] = true;
+            }
+        }
+    }
+
+    let cov = |i: isize, j: isize| -> bool {
+        i >= 0 && j >= 0 && (i as usize) < nx && (j as usize) < ny && covered[i as usize * ny + j as usize]
+    };
+
+    let (mut area, mut perim) = (0i64, 0i64);
+    for i in 0..nx {
+        let dx = (xs[i + 1] - xs[i]) as i64;
+        for j in 0..ny {
+            if !covered[i * ny + j] {
+                continue;
+            }
+            let dy = (ys[j + 1] - ys[j]) as i64;
+            area += dx * dy;
+            // A cell edge is on the boundary of the union exactly when its neighbour is not
+            // covered — which is what makes interior junction edges vanish.
+            let (i, j) = (i as isize, j as isize);
+            if !cov(i - 1, j) {
+                perim += dy;
+            }
+            if !cov(i + 1, j) {
+                perim += dy;
+            }
+            if !cov(i, j - 1) {
+                perim += dx;
+            }
+            if !cov(i, j + 1) {
+                perim += dx;
+            }
+        }
+    }
+    (area, perim)
+}
+
 /// Metal collected by one gate at one stage, in DBU units (area DBU², perimeter DBU).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Collected {
@@ -168,7 +242,11 @@ impl WireGraph {
             .map(|&stage| {
                 let mut uf = self.components_at(stage);
                 let root = uf.find(anchor as u32);
-                let mut c = Collected::default();
+
+                // Gather this gate's conductor per layer, then union each layer. Unioning is
+                // per layer because layers are physically separate sheets of metal: shapes on
+                // different layers never share a boundary, so their perimeters simply add.
+                let mut by_layer: HashMap<i64, Vec<(i32, i32, i32, i32)>> = HashMap::new();
                 for (i, s) in self.shapes.iter().enumerate() {
                     if s.is_via || s.layer < 0 || s.layer > stage {
                         continue;
@@ -176,16 +254,17 @@ impl WireGraph {
                     if uf.find(i as u32) != root {
                         continue; // a different conductor at this stage
                     }
-                    let (dx, dy) = ((s.x1 - s.x0) as i64, (s.y1 - s.y0) as i64);
-                    if dx <= 0 || dy <= 0 {
-                        continue;
-                    }
-                    let (area, perim) = (dx * dy, 2 * (dx + dy));
+                    by_layer.entry(s.layer).or_default().push((s.x0, s.y0, s.x1, s.y1));
+                }
+
+                let mut c = Collected::default();
+                for (layer, rects) in &by_layer {
+                    let (area, perim) = union_area_perimeter(rects);
                     c.cumulative_area += area;
                     c.cumulative_perimeter += perim;
-                    if s.layer == stage {
-                        c.layer_area += area;
-                        c.layer_perimeter += perim;
+                    if *layer == stage {
+                        c.layer_area = area;
+                        c.layer_perimeter = perim;
                     }
                 }
                 (stage, c)
@@ -252,11 +331,84 @@ mod tests {
 
     /// Abutting shapes are one conductor: sharing an edge is an electrical connection, and
     /// treating it as a gap would split routed wires into fictitious pieces.
+    ///
+    /// The perimeter is the giveaway. Two 50x10 rectangles summed separately give 240; the
+    /// single 100x10 wire they actually form has a perimeter of 220. That 20 is the shared
+    /// edge counted twice — an edge no physical wire has.
     #[test]
     fn abutting_shapes_are_one_conductor() {
         let g = WireGraph::new(vec![metal(1, 0, 50), metal(1, 50, 100)]);
         let a = g.anchor(10, 5).unwrap();
-        assert_eq!(g.collected_by_stage(a)[0].1.layer_area, 500 + 500);
+        let c = g.collected_by_stage(a)[0].1;
+        assert_eq!(c.layer_area, 1000, "100 x 10");
+        assert_eq!(c.layer_perimeter, 220, "2*(100+10) — not 240, which counts the join twice");
+    }
+
+    // ---- union geometry ---------------------------------------------------------------
+
+    /// One rectangle is its own union.
+    #[test]
+    fn union_of_a_single_rect() {
+        assert_eq!(union_area_perimeter(&[(0, 0, 10, 4)]), (40, 28));
+    }
+
+    /// The case the fix exists for: a wire delivered as many abutting pieces must measure as
+    /// the wire, not as the pieces.
+    #[test]
+    fn abutting_run_measures_as_one_wire() {
+        let pieces: Vec<_> = (0..10).map(|i| (i * 10, 0, i * 10 + 10, 4)).collect();
+        let (area, perim) = union_area_perimeter(&pieces);
+        assert_eq!(area, 400, "100 x 4");
+        assert_eq!(perim, 208, "2*(100+4); summing pieces would give 280");
+    }
+
+    /// Overlap is counted once, in both area and perimeter.
+    #[test]
+    fn overlapping_rects_are_counted_once() {
+        // Two 10x10 squares overlapping in a 5x10 strip -> 15x10 union.
+        let (area, perim) = union_area_perimeter(&[(0, 0, 10, 10), (5, 0, 15, 10)]);
+        assert_eq!(area, 150);
+        assert_eq!(perim, 50, "2*(15+10)");
+    }
+
+    /// Disjoint pieces keep their own boundaries — the union of two islands is two islands.
+    #[test]
+    fn disjoint_rects_add_their_perimeters() {
+        let (area, perim) = union_area_perimeter(&[(0, 0, 10, 10), (100, 100, 110, 110)]);
+        assert_eq!(area, 200);
+        assert_eq!(perim, 40 + 40);
+    }
+
+    /// An L shape: the reflex corner must not lose or gain edge length.
+    #[test]
+    fn l_shape_perimeter_is_exact() {
+        // Vertical 10x30 plus horizontal 30x10 sharing the bottom-left 10x10 corner.
+        let (area, perim) = union_area_perimeter(&[(0, 0, 10, 30), (0, 0, 30, 10)]);
+        assert_eq!(area, 300 + 300 - 100);
+        // Traversing the boundary: 30 up, 10 right, 20 down, 20 right, 10 down, 30 left.
+        assert_eq!(perim, 30 + 10 + 20 + 20 + 10 + 30);
+    }
+
+    /// A fully enclosed hole keeps its inner boundary — it is real edge, not an artefact.
+    #[test]
+    fn a_ring_keeps_its_inner_boundary() {
+        // 30x30 ring, 10 wide, leaving a 10x10 hole in the middle.
+        let (area, perim) = union_area_perimeter(&[
+            (0, 0, 30, 10),
+            (0, 20, 30, 30),
+            (0, 0, 10, 30),
+            (20, 0, 30, 30),
+        ]);
+        assert_eq!(area, 900 - 100);
+        assert_eq!(perim, 120 + 40, "outer 4*30 plus the hole's 4*10");
+    }
+
+    /// Degenerate and empty inputs measure nothing rather than panicking.
+    #[test]
+    fn degenerate_rects_measure_nothing() {
+        assert_eq!(union_area_perimeter(&[]), (0, 0));
+        assert_eq!(union_area_perimeter(&[(5, 5, 5, 10)]), (0, 0), "zero width");
+        assert_eq!(union_area_perimeter(&[(5, 5, 10, 5)]), (0, 0), "zero height");
     }
 
     /// A pin lands on the lowest metal covering it — not on a higher layer merely passing over.
