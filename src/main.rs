@@ -13,10 +13,12 @@ vyges-ant — antenna ratio sign-off over the routed design database
 
 USAGE:
   vyges-ant check <design.odb> [-o FILE] [--json]
+  vyges-ant explain <design.odb> --net NAME
   vyges-ant --describe
   vyges-ant --help
 
 OPTIONS:
+  --net NAME            (explain) dump one net's per-gate, per-stage attribution
   -o FILE               write the report to FILE instead of stdout
   --json                emit JSON (the default for `check`)
   --describe            print a machine-readable JSON description of the command
@@ -68,6 +70,63 @@ const DESCRIBE: &str = r#"{
 }
 "#;
 
+/// Dump one net's attribution: every gate, and what metal it has collected at each stage.
+///
+/// A verdict says a net failed; this says why — which gate, on which layer, against how much
+/// metal and how much gate area. It is also how the engine is correlated against another
+/// checker, since disagreement is only actionable once both sides show their working.
+fn explain(args: &[String]) -> ExitCode {
+    let mut odb_path: Option<&str> = None;
+    let mut net: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--net" => {
+                i += 1;
+                match args.get(i) {
+                    Some(n) => net = Some(n),
+                    None => {
+                        eprintln!("vyges-ant: --net needs a NAME");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            a if a.starts_with('-') => {
+                eprintln!("vyges-ant: unknown option `{a}`");
+                return ExitCode::from(2);
+            }
+            a => odb_path = Some(a),
+        }
+        i += 1;
+    }
+    let (Some(odb_path), Some(net)) = (odb_path, net) else {
+        eprintln!("vyges-ant: `explain` needs a .odb and --net NAME\n\n{USAGE}");
+        return ExitCode::from(2);
+    };
+    let db = match Db::open(odb_path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("vyges-ant: cannot read {odb_path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let dbu = db.dbu_per_micron() as f64;
+    if dbu <= 0.0 {
+        eprintln!("vyges-ant: no DBU scale");
+        return ExitCode::from(2);
+    }
+    match vyges_ant::read_net(&db, net, dbu) {
+        Some(na) => {
+            println!("{}", serde_json::to_string_pretty(&na).unwrap_or_default());
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("vyges-ant: {net} has no routed metal (or does not exist)");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -78,6 +137,9 @@ fn main() -> ExitCode {
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{USAGE}");
         return if args.is_empty() { ExitCode::from(2) } else { ExitCode::SUCCESS };
+    }
+    if args[0] == "explain" {
+        return explain(&args[1..]);
     }
     if args[0] != "check" {
         eprintln!("vyges-ant: unknown command `{}`\n\n{USAGE}", args[0]);
