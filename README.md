@@ -74,28 +74,25 @@ Correlated against OpenROAD `check_antennas` on a routed sky130 block (~2500 net
 
 | | |
 | --- | --- |
-| Ratio values within 2% of OpenROAD's | **37 of 38** compared |
-| Violations OpenROAD does not confirm | **6** |
-| Violations matched exactly (net + pin + layer + ratio) | 37 of 83 |
-| Violations missed | 46 |
+| Violations matched exactly (net + pin + layer + ratio) | **65 of 83** |
+| Violations OpenROAD does not confirm | **9** |
+| Ratio values within 2% of OpenROAD's | **64 of 66** compared |
+| Limit disagreements | **none** — all 66 shared records agree exactly |
 
-**Where it produces a number, that number is right.** What it currently lacks is *recall* — it
-misses more than half of the real violations. So a flagged net is now strong evidence, and a
-clean run is still weak evidence. Not a sign-off gate: run `check_antennas` to gate a tapeout.
+Good enough that a flagged net is strong evidence and a clean run is meaningful evidence. Still
+**not a sign-off gate**: 18 real violations are missed, most of them on met4. Run
+`check_antennas` before a tapeout.
 
-### The one remaining error, specified
+### What is still missing
 
-Diffusion area is accumulated **net-wide**; OpenROAD accumulates it **per conductor**
-(`info.iterm_diff_area += diffArea(...)` over the gates of a node). A net-wide total is never
-smaller than a region's, so our diffusion-dependent limit comes out too *high* and violations
-slip under it — which is exactly the shape of the misses: the limit deltas on disagreeing
-records are all positive (352.1, 347.8, 173.9, 2726.0).
+**Cut layers are not checked.** OpenROAD evaluates `mcon`/`via`/`via2` against their own ratios;
+this engine evaluates routing layers only.
 
-Two smaller deltas from the same reading of `AntennaChecker.cc`: the layer `metal_factor` /
-`side_metal_factor` multipliers are not applied, and `diff_psr` is computed by a distinct
-formula (`− minus_diff_factor × diff_area` in the numerator, `+ plus_diff_protect` in the
-denominator, scaled by the `AreaDiffReduce` PWL) — and it is `diff_psr`, not `psr`, that
-OpenROAD compares against a diffusion PWL limit.
+**Two formula details from `AntennaChecker.cc` are not implemented**: the layer `metal_factor` /
+`side_metal_factor` multipliers, and OpenROAD's distinct `diff_psr` (`− minus_diff_factor ×
+diff_area` in the numerator, `+ plus_diff_protect` in the denominator, scaled by the
+`AreaDiffReduce` PWL) — and it is `diff_psr`, not `psr`, that OpenROAD compares against a
+diffusion PWL limit. These are the leading candidates for the 18 misses.
 
 ### How the model was arrived at
 
@@ -108,6 +105,9 @@ Worth stating because two plausible models were wrong first:
 3. **Charge each conductor, denominator summed over the gates on it.** Confirmed by reading
    `AntennaChecker.cc`, and checked numerically first: region metal of 1603.33 µm² over its
    three gates (0.4347 + 0.4347 + 0.126 = 0.9954) gives 1610.7 against OpenROAD's 1611.2.
+4. **Index the limit by each conductor's own diffusion, not the net's total.** A net-wide total
+   is never smaller, so the bar sat too high and real violations slipped under. Fixing it took
+   exact matches from 37 to 65 and removed *every* limit disagreement.
 
 A separate hypothesis — that summing rectangle perimeters instead of unioning them was the
 dominant error — was implemented exactly and **rejected by measurement**: it changed the result
