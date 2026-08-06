@@ -285,10 +285,14 @@ impl NetGraph {
         hits
     }
 
-    /// Group terminals into the conductors they share at `stage`, with each group's metal.
+    /// The conductors present at `stage`, each with the terminals sitting on it.
     ///
-    /// `attach[t]` is the conductor set terminal `t` touches. A terminal shorts what it touches,
-    /// so two fragments meeting at one pin are one conductor from that stage on.
+    /// `attach[t]` is the conductor set terminal `t` touches. A terminal that touches several
+    /// conductors belongs to **each of them separately** — it does not merge them. OpenROAD
+    /// keeps such nodes distinct and sums the gate's per-node ratios afterwards
+    /// (`NodeInfo::operator+=`), each node keeping its own denominator. Merging first and
+    /// dividing once gives a different, smaller answer: measured on `tl_cpu_h2d[83]`, merging
+    /// gave 336.9 where OpenROAD reports 484.9.
     pub fn regions_at(&self, stage: i64, attach: &[Vec<usize>]) -> Vec<(Vec<usize>, Collected)> {
         let live = |i: usize| self.conductors[i].layer <= stage;
         let mut uf = UnionFind::new(self.conductors.len());
@@ -297,17 +301,14 @@ impl NetGraph {
                 uf.union(a, b);
             }
         }
-        for touched in attach {
-            let here: Vec<usize> = touched.iter().copied().filter(|&i| live(i)).collect();
-            for w in here.windows(2) {
-                uf.union(w[0] as u32, w[1] as u32);
-            }
-        }
-
         let mut by_root: HashMap<u32, Vec<usize>> = HashMap::new();
         for (t, touched) in attach.iter().enumerate() {
-            if let Some(&first) = touched.iter().find(|&&i| live(i)) {
-                by_root.entry(uf.find(first as u32)).or_default().push(t);
+            let mut roots: Vec<u32> =
+                touched.iter().filter(|&&i| live(i)).map(|&i| uf.find(i as u32)).collect();
+            roots.sort_unstable();
+            roots.dedup();
+            for r in roots {
+                by_root.entry(r).or_default().push(t);
             }
         }
 
@@ -487,17 +488,25 @@ mod tests {
         assert!(g.touched_by(&[bx(5, 500, 520, true)]).is_empty());
     }
 
-    /// A terminal shorts what it touches: the pieces either side of it are one conductor again.
+    /// A terminal touching two conductors belongs to **both**, and does not merge them.
+    ///
+    /// OpenROAD keeps such nodes distinct and sums the gate's per-node ratios afterwards, each
+    /// node keeping its own denominator. Merging first and dividing once gives a smaller answer:
+    /// on `tl_cpu_h2d[83]` that was 336.9 against OpenROAD's 484.9.
     #[test]
-    fn a_terminal_shorts_the_pieces_it_bridges() {
+    fn a_terminal_on_two_conductors_belongs_to_both_without_merging_them() {
         let pin = bx(5, 40, 60, true);
         let g = NetGraph::build(&[bx(5, 0, 100, true)], &[pin]);
-        assert_eq!(g.conductors.len(), 2);
+        assert_eq!(g.conductors.len(), 2, "the pin cut it in two");
         let touched = g.touched_by(&[pin]);
         assert_eq!(touched.len(), 2, "abuts both pieces");
+
         let regions = g.regions_at(5, &[touched]);
-        assert_eq!(regions.len(), 1, "the terminal rejoins them");
-        assert_eq!(regions[0].1.layer_area, 800);
+        assert_eq!(regions.len(), 2, "two conductors, two records — not one merged");
+        for (terms, c) in &regions {
+            assert_eq!(terms, &vec![0], "the terminal is on both");
+            assert_eq!(c.layer_area, 400, "each keeps its own 40x10");
+        }
     }
 
     /// **The case that defeated every earlier model.** Two terminals on a wire cut between them

@@ -421,3 +421,58 @@ fn absent_factors_leave_the_ratio_unscaled() {
     assert!((value - 25.0).abs() < 1e-9, "100/4 unscaled");
     assert!((limit - 10.0).abs() < 1e-9);
 }
+
+/// A gate landing on several conductors of one layer is judged on the **sum** of their ratios,
+/// each computed against that conductor's own denominator.
+///
+/// Merging the conductors and dividing once gives a smaller answer — measured on
+/// `tl_cpu_h2d[83]`, 336.9 against OpenROAD's 484.9. This mirrors OpenROAD's
+/// `gate_info[iterm][layer] += info`.
+#[test]
+fn a_gate_on_two_conductors_sums_their_ratios() {
+    let r = rules(vec![("met1", m1_par_only())]); // PAR limit 10.0
+    // Two conductors, each 40 µm² over the gate's own 10 µm²: 4.0 each, 8.0 summed — under.
+    let under = net(
+        vec![
+            region("met1", 1, &["g/A"], 10.0, 40.0, 0.0, 40.0, 0.0),
+            region("met1", 1, &["g/A"], 10.0, 40.0, 0.0, 40.0, 0.0),
+        ],
+        0.0,
+    );
+    assert!(check(&under, &r).is_empty(), "4.0 + 4.0 = 8.0, under the limit of 10");
+
+    // 60 each: 6.0 + 6.0 = 12.0, over. Merged-then-divided would be 120/10 = 12 too, but with
+    // differing denominators the two disagree — see the next case.
+    let over = net(
+        vec![
+            region("met1", 1, &["g/A"], 10.0, 60.0, 0.0, 60.0, 0.0),
+            region("met1", 1, &["g/A"], 10.0, 60.0, 0.0, 60.0, 0.0),
+        ],
+        0.0,
+    );
+    let v = check(&over, &r);
+    assert_eq!(v.len(), 1, "one verdict per gate per layer, not one per conductor");
+    assert!((v[0].value - 12.0).abs() < 1e-9, "got {}", v[0].value);
+}
+
+/// Each conductor keeps its **own** denominator, which is what makes summing ratios different
+/// from merging. Here one conductor carries a second gate and the other does not.
+#[test]
+fn each_conductor_divides_by_its_own_gate_area() {
+    let r = rules(vec![("met1", m1_par_only())]);
+    let n = net(
+        vec![
+            // Shared with another gate: denominator 2.0.
+            region("met1", 1, &["g/A", "other/A"], 2.0, 10.0, 0.0, 10.0, 0.0),
+            // g's alone: denominator 1.0.
+            region("met1", 1, &["g/A"], 1.0, 10.0, 0.0, 10.0, 0.0),
+        ],
+        0.0,
+    );
+    let v = check(&n, &r);
+    // g/A sees 10/2 + 10/1 = 15.0; merging would give 20/3 = 6.7 and miss it entirely.
+    let g = v.iter().find(|x| x.pin == "g/A").expect("g/A flagged");
+    assert!((g.value - 15.0).abs() < 1e-9, "got {}", g.value);
+    // other/A is only on the shared conductor: 10/2 = 5.0, under the limit.
+    assert!(v.iter().all(|x| x.pin != "other/A"), "other/A sees only 5.0");
+}

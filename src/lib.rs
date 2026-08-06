@@ -586,36 +586,81 @@ pub fn check_net(
     rules: &std::collections::BTreeMap<String, LayerRules>,
     out: &mut Vec<Violation>,
 ) {
+    // A gate that lands on several conductors of one layer is judged on the SUM of their
+    // ratios, each computed against that conductor's own denominator — OpenROAD's
+    // `gate_info[iterm][layer] += info`. Merging the conductors and dividing once instead gives
+    // a smaller answer: measured on `tl_cpu_h2d[83]`, 336.9 against OpenROAD's 484.9.
+    //
+    // ⚠️ The limit comes from the FIRST conductor's diffusion, not the sum. That is what
+    // OpenROAD does — `NodeInfo::operator+=` accumulates the ratios and the areas but leaves
+    // `iterm_diff_area` and `iterm_gate_area` untouched, so the merged record keeps whichever
+    // node was recorded first. Every other field in that struct accumulates, so this looks like
+    // an oversight rather than a decision. Reproduced deliberately, because a checker that
+    // disagrees with the incumbent is not usable as a cross-check — and raised upstream rather
+    // than silently enshrined.
+    struct Acc {
+        value: f64,
+        limit: f64,
+        gate_area_um2: f64,
+        diff_area_um2: f64,
+        metal_area_um2: f64,
+    }
+    // (pin, layer, ratio) -> accumulated
+    let mut acc: std::collections::BTreeMap<(String, String, u8), Acc> = Default::default();
+
     for rg in &net.regions {
         let Some(r) = rules.get(&rg.layer).filter(|r| r.has_any_limit()) else { continue };
-        let mut test = |ratio: Ratio, area: f64| {
-            // Value and limit together: which of them applies depends on whether THIS conductor
-            // carries diffusion, so they cannot be computed independently.
-            let (value, limit) = r.evaluate(ratio, area, rg.gate_area_um2, rg.diff_area_um2);
-            if limit > 0.0 && value > limit {
-                for pin in &rg.pins {
-                    out.push(Violation {
-                        net: net.net.clone(),
-                        pin: pin.clone(),
-                        layer: rg.layer.clone(),
-                        ratio,
-                        value,
-                        limit,
+        for (kind, ratio, metal) in [
+            (0u8, Ratio::Par, rg.area_um2),
+            (1, Ratio::Car, rg.cum_area_um2),
+            (2, Ratio::Psr, rg.side_area_um2),
+            (3, Ratio::Csr, rg.cum_side_area_um2),
+        ] {
+            // Side-area ratios need a stated thickness; without one the side area is unknown,
+            // and testing it as 0 would report a pass we have not earned.
+            if matches!(ratio, Ratio::Psr | Ratio::Csr) && rg.side_area_um2 <= 0.0 {
+                continue;
+            }
+            let (value, limit) = r.evaluate(ratio, metal, rg.gate_area_um2, rg.diff_area_um2);
+            if limit <= 0.0 {
+                continue;
+            }
+            for pin in &rg.pins {
+                let e = acc
+                    .entry((pin.clone(), rg.layer.clone(), kind))
+                    .or_insert(Acc {
+                        value: 0.0,
+                        limit, // first conductor's limit — see the note above
                         gate_area_um2: rg.gate_area_um2,
                         diff_area_um2: rg.diff_area_um2,
-                        metal_area_um2: area,
+                        metal_area_um2: 0.0,
                     });
-                }
+                e.value += value;
+                e.metal_area_um2 += metal;
             }
-        };
-        test(Ratio::Par, rg.area_um2);
-        test(Ratio::Car, rg.cum_area_um2);
-        // Side-area ratios need a stated thickness; without one the side area is unknown, and
-        // testing it as 0 would report a pass we have not earned.
-        if rg.side_area_um2 > 0.0 {
-            test(Ratio::Psr, rg.side_area_um2);
-            test(Ratio::Csr, rg.cum_side_area_um2);
         }
+    }
+
+    for ((pin, layer, kind), a) in acc {
+        if a.value <= a.limit {
+            continue;
+        }
+        out.push(Violation {
+            net: net.net.clone(),
+            pin,
+            layer,
+            ratio: match kind {
+                0 => Ratio::Par,
+                1 => Ratio::Car,
+                2 => Ratio::Psr,
+                _ => Ratio::Csr,
+            },
+            value: a.value,
+            limit: a.limit,
+            gate_area_um2: a.gate_area_um2,
+            diff_area_um2: a.diff_area_um2,
+            metal_area_um2: a.metal_area_um2,
+        });
     }
 }
 
