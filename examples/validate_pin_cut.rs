@@ -1,208 +1,162 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Throwaway validation of one hypothesis, before rewriting the graph on the strength of it.
+//! Prototype of the OpenROAD-shaped conductor graph, on one net, before rewriting `graph.rs`.
 //!
-//! **The question.** OpenROAD subtracts every terminal's pin metal from the wire polygons before
-//! building nodes (`avoidPinIntersection`), which makes pins *cut points* in the metal. Does that
-//! subtraction actually separate `_0711_/A` from its protection diode on `tl_cpu_h2d[77]` met1 —
-//! the net where we currently pass at 371.6 and OpenROAD violates at 535.1?
+//! Builds what `AntennaChecker` builds: decomposed via geometry on every layer, pin metal
+//! subtracted, per-layer connected components, cross-layer links through the cut layers, and
+//! pins attached to what their own boxes touch.
 //!
-//! **The prediction, if the hypothesis holds.** The gate's fragment carries gate area 0.99 (its
-//! own, not 1.4247 pooled with the diode's) and diffusion 0.0 (not 0.4347), so the limit is the
-//! curve at zero diffusion — 400 — and the ratio lands near 535.
+//! **The question.** On `tl_cpu_h2d[77]` at stage met1, does `_0711_/A` end up on a conductor
+//! *without* its protection diode — gate area 0.99 and diffusion 0.0 rather than 1.4247 and
+//! 0.4347 — giving a ratio near OpenROAD's 535.1 against a limit of 400?
 //!
-//! Run: `cargo run --release --example validate_pin_cut -- <design.odb> <net> <layer>`
+//! Run: `cargo run --release --example validate_pin_cut -- <design.odb> <net> <stage-layer>`
 
-use std::collections::HashMap;
-use vyges_opendb::{Db, WireShape};
+use std::collections::BTreeMap;
+use vyges_opendb::{Db, LayerBox};
+
+/// Union-find over box indices.
+struct Uf(Vec<u32>);
+impl Uf {
+    fn new(n: usize) -> Self {
+        Uf((0..n as u32).collect())
+    }
+    fn find(&mut self, mut i: u32) -> u32 {
+        while self.0[i as usize] != i {
+            self.0[i as usize] = self.0[self.0[i as usize] as usize];
+            i = self.0[i as usize];
+        }
+        i
+    }
+    fn union(&mut self, a: u32, b: u32) {
+        let (x, y) = (self.find(a), self.find(b));
+        if x != y {
+            self.0[x as usize] = y;
+        }
+    }
+}
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let (odb, net, want_layer) = match args.as_slice() {
-        [a, b, c] => (a.clone(), b.clone(), c.clone()),
-        _ => {
-            eprintln!("usage: validate_pin_cut <design.odb> <net> <layer>");
-            std::process::exit(2);
-        }
-    };
+    let a: Vec<String> = std::env::args().skip(1).collect();
+    let (odb, net, stage_name) = (a[0].clone(), a[1].clone(), a[2].clone());
     let db = Db::open(&odb).expect("open odb");
     let dbu = db.dbu_per_micron() as f64;
 
-    // Resolve the layer by name, and pull the net's wire rectangles on it.
-    let shapes = db.net_wire_shapes(&net);
-    let layer_num = shapes
+    let boxes = db.net_wire_boxes(&net);
+    let stage = boxes
         .iter()
-        .map(|s| if s.is_via { s.via_top } else { s.layer })
-        .filter(|&n| n >= 0)
-        .find(|&n| db.layer_name_by_number(n) == want_layer)
-        .unwrap_or_else(|| panic!("net has nothing on {want_layer}"));
-    let wires: Vec<WireShape> =
-        shapes.iter().copied().filter(|s| !s.is_via && s.layer == layer_num).collect();
+        .map(|b| b.layer)
+        .find(|&n| db.layer_name_by_number(n) == stage_name)
+        .expect("stage layer not on this net");
 
-    // Every terminal's pin metal on that layer, plus its antenna areas.
+    // Terminals, with their own pin metal.
     struct Term {
         name: String,
         gate: f64,
         diff: f64,
-        boxes: Vec<WireShape>,
+        boxes: Vec<LayerBox>,
     }
     let terms: Vec<Term> = db
         .net_iterms(&net)
         .into_iter()
         .filter_map(|it| {
             let (inst, pin) = it.rsplit_once('/')?;
-            let master = db.inst_master(inst);
+            let m = db.inst_master(inst);
             Some(Term {
-                gate: db.mterm_antenna_gate_area(&master, pin),
-                diff: db.mterm_antenna_diff_area(&master, pin),
+                gate: db.mterm_antenna_gate_area(&m, pin),
+                diff: db.mterm_antenna_diff_area(&m, pin),
+                // Pin boxes come back as WireShape; the only fields used here are layer + rect.
                 boxes: db
                     .iterm_pin_boxes(inst, pin)
                     .into_iter()
-                    .filter(|b| b.layer == layer_num)
+                    .map(|w| LayerBox {
+                        layer: w.layer,
+                        x0: w.x0,
+                        y0: w.y0,
+                        x1: w.x1,
+                        y1: w.y1,
+                        is_routing: true,
+                        from_via: false,
+                    })
                     .collect(),
                 name: it.clone(),
             })
         })
         .collect();
 
-    println!("net {net} on {want_layer}: {} wire rects, {} terminals", wires.len(), terms.len());
+    // Everything that exists by this stage — cut layers included, since a via's cut is how a
+    // conductor reaches the layer above.
+    let live: Vec<(usize, LayerBox)> =
+        boxes.iter().copied().enumerate().filter(|(_, b)| b.layer <= stage).collect();
+    println!("net {net}, stage {stage_name}: {} boxes live", live.len());
 
-    // --- the grid: wire cells, minus pin cells -------------------------------------------
-    let mut xs: Vec<i32> = Vec::new();
-    let mut ys: Vec<i32> = Vec::new();
-    for s in wires.iter().chain(terms.iter().flat_map(|t| t.boxes.iter())) {
-        xs.push(s.x0);
-        xs.push(s.x1);
-        ys.push(s.y0);
-        ys.push(s.y1);
-    }
-    xs.sort_unstable();
-    xs.dedup();
-    ys.sort_unstable();
-    ys.dedup();
-    let (nx, ny) = (xs.len().saturating_sub(1), ys.len().saturating_sub(1));
-    if nx == 0 || ny == 0 {
-        println!("no geometry");
-        return;
-    }
-    let idx = |i: usize, j: usize| i * ny + j;
-    let mut cell = vec![false; nx * ny];
-    let mut mark = |s: &WireShape, on: bool, cell: &mut Vec<bool>| {
-        let i0 = xs.partition_point(|&v| v < s.x0);
-        let i1 = xs.partition_point(|&v| v < s.x1);
-        let j0 = ys.partition_point(|&v| v < s.y0);
-        let j1 = ys.partition_point(|&v| v < s.y1);
-        for i in i0..i1 {
-            for j in j0..j1 {
-                cell[idx(i, j)] = on;
+    // Conductors: same-layer contact, plus contact across ONE layer step. The odb layer stack is
+    // consecutive (li1, mcon, met1, via, met2 …), so a routing layer and the cut above it differ
+    // by one — that adjacency is what makes the graph three-dimensional.
+    let mut uf = Uf::new(live.len());
+    for i in 0..live.len() {
+        for j in i + 1..live.len() {
+            let (a, b) = (&live[i].1, &live[j].1);
+            if (a.layer - b.layer).abs() <= 1 && a.touches(b) {
+                uf.union(i as u32, j as u32);
             }
         }
-    };
-    for w in &wires {
-        mark(w, true, &mut cell);
     }
-    let covered_before = cell.iter().filter(|&&c| c).count();
-    // THE HYPOTHESIS: pin metal is removed from the wire, cutting it.
-    for t in &terms {
-        for b in &t.boxes {
-            mark(b, false, &mut cell);
-        }
-    }
-    println!(
-        "cells covered by wire: {covered_before} -> {} after subtracting pin metal",
-        cell.iter().filter(|&&c| c).count()
-    );
 
-    // --- connected components over surviving cells ---------------------------------------
-    let mut comp = vec![usize::MAX; nx * ny];
-    let mut ncomp = 0usize;
-    for start in 0..nx * ny {
-        if !cell[start] || comp[start] != usize::MAX {
-            continue;
-        }
-        let mut stack = vec![start];
-        comp[start] = ncomp;
-        while let Some(c) = stack.pop() {
-            let (i, j) = (c / ny, c % ny);
-            // 4-connectivity: cells sharing an edge are one conductor; a diagonal touch is not.
-            let mut push = |i: usize, j: usize, stack: &mut Vec<usize>, comp: &mut Vec<usize>| {
-                let k = idx(i, j);
-                if cell[k] && comp[k] == usize::MAX {
-                    comp[k] = ncomp;
-                    stack.push(k);
-                }
-            };
-            if i > 0 { push(i - 1, j, &mut stack, &mut comp); }
-            if i + 1 < nx { push(i + 1, j, &mut stack, &mut comp); }
-            if j > 0 { push(i, j - 1, &mut stack, &mut comp); }
-            if j + 1 < ny { push(i, j + 1, &mut stack, &mut comp); }
-        }
-        ncomp += 1;
-    }
-    println!("fragments after the cut: {ncomp}");
+    // Pins CUT the metal: OpenROAD subtracts pin polygons before building nodes. Approximated
+    // here by dropping boxes wholly covered by a pin box — enough to see whether the cut is what
+    // separates the gate from its diode.
+    let covered_by_pin: Vec<bool> = live
+        .iter()
+        .map(|(_, b)| {
+            terms.iter().flat_map(|t| t.boxes.iter()).any(|p| {
+                p.layer == b.layer && p.x0 <= b.x0 && p.y0 <= b.y0 && b.x1 <= p.x1 && b.y1 <= p.y1
+            })
+        })
+        .collect();
+    println!("boxes wholly inside a pin (would be cut away): {}", covered_by_pin.iter().filter(|&&c| c).count());
 
-    // --- which fragment does each terminal touch? ----------------------------------------
-    // A pin's own footprint is now empty, so it attaches to what abuts it (1 DBU halo, the
-    // same tolerance OpenROAD's findNodesWithIntersection uses).
-    let mut per_comp: HashMap<usize, (f64, f64, Vec<String>)> = HashMap::new();
+    // Attach each terminal to the conductors its own boxes touch, and short them.
+    let mut per_root: BTreeMap<u32, (f64, f64, Vec<String>)> = BTreeMap::new();
     for t in &terms {
         let mut hits: Vec<usize> = Vec::new();
-        for b in &t.boxes {
-            for i in 0..nx {
-                for j in 0..ny {
-                    let k = idx(i, j);
-                    if !cell[k] {
-                        continue;
-                    }
-                    let touch = xs[i] <= b.x1 + 1
-                        && b.x0 - 1 <= xs[i + 1]
-                        && ys[j] <= b.y1 + 1
-                        && b.y0 - 1 <= ys[j + 1];
-                    if touch && !hits.contains(&comp[k]) {
-                        hits.push(comp[k]);
-                    }
+        for pb in &t.boxes {
+            for (k, (_, b)) in live.iter().enumerate() {
+                if (pb.layer - b.layer).abs() <= 1 && pb.touches(b) && !hits.contains(&k) {
+                    hits.push(k);
                 }
             }
         }
-        for &h in &hits {
-            let e = per_comp.entry(h).or_insert((0.0, 0.0, Vec::new()));
+        for w in hits.windows(2) {
+            uf.union(w[0] as u32, w[1] as u32);
+        }
+        if let Some(&first) = hits.first() {
+            let r = uf.find(first as u32);
+            let e = per_root.entry(r).or_insert((0.0, 0.0, Vec::new()));
             e.0 += t.gate;
             e.1 += t.diff;
             e.2.push(t.name.clone());
         }
-        println!("  {:46} gate={:.4} diff={:.4} -> fragments {hits:?}", t.name, t.gate, t.diff);
+        println!("  {:44} gate={:.4} diff={:.4} touches {} boxes", t.name, t.gate, t.diff, hits.len());
     }
 
-    // --- area / perimeter per fragment, and the resulting ratio ---------------------------
-    let thick = db.layer_thickness(&want_layer) as f64;
+    // Per conductor: metal on the stage layer only (the PSR numerator).
+    let thick = db.layer_thickness(&stage_name) as f64;
     let dbu2 = dbu * dbu;
-    println!("\nfragment  gate      diff      side_area   psr        pins");
-    let mut ids: Vec<usize> = per_comp.keys().copied().collect();
-    ids.sort();
-    for c in ids {
-        let (gate, diff, pins) = &per_comp[&c];
-        let mut perim = 0i64;
-        for i in 0..nx {
-            for j in 0..ny {
-                if comp[idx(i, j)] != c {
-                    continue;
-                }
-                let (dx, dy) = ((xs[i + 1] - xs[i]) as i64, (ys[j + 1] - ys[j]) as i64);
-                let cov = |a: isize, b: isize| -> bool {
-                    a >= 0
-                        && b >= 0
-                        && (a as usize) < nx
-                        && (b as usize) < ny
-                        && comp[idx(a as usize, b as usize)] == c
-                };
-                let (i, j) = (i as isize, j as isize);
-                if !cov(i - 1, j) { perim += dy; }
-                if !cov(i + 1, j) { perim += dy; }
-                if !cov(i, j - 1) { perim += dx; }
-                if !cov(i, j + 1) { perim += dx; }
-            }
-        }
+    println!("\nconductor  gate      diff      side_area   psr        pins");
+    let roots: Vec<u32> = per_root.keys().copied().collect();
+    for r in roots {
+        let rects: Vec<(i32, i32, i32, i32)> = live
+            .iter()
+            .enumerate()
+            .filter(|(k, (_, b))| {
+                b.layer == stage && b.is_routing && uf.find(*k as u32) == r && !covered_by_pin[*k]
+            })
+            .map(|(_, (_, b))| (b.x0, b.y0, b.x1, b.y1))
+            .collect();
+        let (_, perim) = vyges_ant::graph::union_area_perimeter(&rects);
         let side = (perim as f64 * thick) / dbu2;
+        let (gate, diff, pins) = &per_root[&r];
         let psr = if *gate > 0.0 { side / gate } else { 0.0 };
-        println!("{c:8}  {gate:<9.4} {diff:<9.4} {side:<11.2} {psr:<10.1} {pins:?}");
+        println!("{r:9}  {gate:<9.4} {diff:<9.4} {side:<11.2} {psr:<10.1} {pins:?}");
     }
 }
