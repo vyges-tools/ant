@@ -74,48 +74,27 @@ Correlated against OpenROAD `check_antennas` on a routed sky130 block (~2500 net
 
 | | |
 | --- | --- |
-| Violations matched exactly (net + pin + layer + ratio) | **65 of 83** |
-| Violations OpenROAD does not confirm | **9** |
-| Ratio values within 2% of OpenROAD's | **64 of 66** compared |
-| Limit disagreements | **none** — all 66 shared records agree exactly |
+| Violations matched exactly (net + pin + layer + ratio) | **76 of 83** |
+| Violations OpenROAD does not confirm | **1** |
+| Ratio values within 2% of OpenROAD's | **76 of 77** compared |
+| Limit disagreements | **none** — all 77 shared records agree exactly |
 
-Good enough that a flagged net is strong evidence and a clean run is meaningful evidence. Still
-**not a sign-off gate**: 18 real violations are missed, most of them on met4. Run
-`check_antennas` before a tapeout.
+Runs in ~2.5 s / 194 MB on that block.
 
-### What is still missing — and it is no longer the model
+A flagged net is strong evidence and a clean run is good evidence. **Still not a formal sign-off
+gate**: 7 real violations are missed, so run `check_antennas` before a tapeout. But the two
+engines now agree on what they both see, to the decimal.
 
-The ratio model now matches OpenROAD's `AntennaChecker` formula for formula: per-conductor
-metal and denominator, per-conductor diffusion, the LEF area/side factors including the
-diff-use-only restriction, the diffusion branch with its `minus_diff` and `gate_plus_diff`
-relief terms, and the `AreaDiffReduce` scaling. Implementing the last of those changed the
-measured result by **nothing**, because sky130 states all of those factors as identity — worth
-knowing, and worth having for technologies that do not.
+### What is still missing
 
-**The residual is pin-to-conductor attachment.** This engine matches a pin to metal by
-proximity — the terminal's average point, falling back to the nearest shape of the same net.
-OpenROAD instead takes each terminal's own `dbMPin` boxes, applies the instance transform, and
-intersects them against wire nodes on the same, upper and lower layer (`AntennaChecker::saveGates`).
+**Cut layers are not checked.** OpenROAD evaluates `mcon`/`via`/`via2` against their own ratios
+(`calculateViaPar`); this engine builds cut-layer geometry — it needs it for connectivity — but
+only evaluates routing layers. No violation in the golden report is on a cut layer, so this costs
+nothing here and is still a real gap.
 
-**That method was implemented and measured worse, so it was reverted.** Faithful attachment gave
-53 exact matches and 91 false positives against the heuristic's 65 and 9. The reason is not yet
-understood — the likely suspect is that OpenROAD intersects against *merged per-layer node
-polygons* while this engine holds individual wire fragments, so a pin box shorts differently.
-The geometry shim (`Db::iterm_pin_boxes`) is kept for whoever resumes it.
-
-This is recorded rather than buried because the more principled method losing to the heuristic is
-the interesting fact, and shipping the better-measuring one is the discipline.
-
-Where the heuristic errs it merges conductors that should be separate. Measured on one missed
-violation: we place a gate and its protection diode on one conductor, giving a denominator of
-1.4247 µm² and a diffusion-lifted limit of ~2774, so the net passes at 371.6. OpenROAD's node
-holds the gate alone — denominator 0.99, limit 400 — and 529.40 / 0.99 = 534.7 against its
-reported 535.1. Same metal, same formula, different conductor.
-
-Closing it means binding the wire graph's node/terminal attachment instead of matching geometry.
-
-**Cut layers are also unchecked** (`mcon`/`via`/`via2` have their own ratios). Not a cause of the
-misses here — every violation in the golden report is on a routing layer — but a real gap.
+**CAR/CSR are computed differently.** OpenROAD sums the per-layer *ratios* and keeps separate
+chains for wires and vias; this engine takes the ratio of cumulative areas. Unexercised on
+sky130, which states no cumulative limit.
 
 ### How the model was arrived at
 

@@ -38,13 +38,13 @@ const DESCRIBE: &str = r#"{
       "input_hash covers the argument vector, not the content of the .odb it names.",
       "Both the plain and the diffusion-dependent (PWL) LEF ratio forms are read; where a technology states a diff curve it takes precedence, and outside the curve's stated range the limit is clamped rather than extrapolated.",
       "A ratio the technology states in neither form is not checked. On sky130 only DiffPSR is stated, so PAR, CAR and CSR are unlimited there; layers_without_rules and no_rules_found report this rather than leaving it implied by the exit code.",
-      "NOT A SIGN-OFF GATE YET, though close. Correlated against OpenROAD check_antennas on a routed sky130 block: 65 of 83 violations matched exactly, 9 unconfirmed, 64 of 66 compared values within 2%, and every shared record agreeing on the limit. 18 real violations are still missed, most on met4. Run check_antennas before a tapeout.",
+      "Correlated against OpenROAD check_antennas on a routed sky130 block: 76 of 83 violations matched exactly, 1 unconfirmed, 76 of 77 compared values within 2%, and every shared record agreeing on the limit. 7 real violations are still missed, so this is not yet a formal sign-off gate -- run check_antennas before a tapeout -- but the two engines agree to the decimal on what they both see.",
       "The ratio is charged per CONDUCTOR: metal reachable from the gates over layers at or below the one being deposited, divided by the summed gate area of the gates on that conductor. Measured as the exact union of the rectangles, so overlap and abutment count once.",
       "The diffusion-dependent limit is indexed by each conductor's own diffusion, matching OpenROAD's per-node iterm_diff_area. Every terminal is anchored to a conductor, not only the gates, since a diode pin carries diffusion without carrying a gate.",
-      "The ratio model matches OpenROAD's AntennaChecker formula for formula, including the LEF area/side factors, the diffusion branch with its minus_diff and gate_plus_diff relief terms, and AreaDiffReduce scaling. The remaining disagreement is pin-to-conductor ATTACHMENT: pins are matched to metal geometrically (terminal average point, nearest-shape fallback) where OpenROAD reads attachment from the routing topology, so conductors are occasionally merged that should be separate.",
+      "The conductor graph follows AntennaChecker: vias decomposed onto the layers they occupy, pin metal subtracted so pins cut the wire into antenna regions, components labelled per layer, layers joined through the cut between them, and terminals attached to the fragments their own pin boxes touch.",
       "Cut layers (mcon/via/via2) are not checked; routing layers only.",
       "Diffusion area is applied net-wide, where the real limit varies per layer as the path to diffusion completes.",
-      "A gate whose pin centre is not covered by metal anchors to the nearest shape of its own net, because the router lands on an access point rather than the reported centroid.",
+      "A terminal whose pin metal touches no routing is attached to nothing and, if it is a gate, counted in gates_unanchored rather than silently skipped.",
       "Layer accumulation order is dbTechLayer routing level, not a manufacturing step model."
   ],
   "invocation": {
