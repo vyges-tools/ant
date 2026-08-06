@@ -86,9 +86,9 @@
 
 pub mod graph;
 
-use graph::WireGraph;
+use graph::NetGraph;
 use serde::Serialize;
-use vyges_opendb::{DiffCurve, Db};
+use vyges_opendb::{DiffCurve, Db, LayerBox};
 
 /// Which ratio a violation is against. The four are checked independently: a net can pass PAR
 /// and fail CAR, which is the whole reason the cumulative form exists.
@@ -220,32 +220,20 @@ pub struct Report {
 /// nothing. The DBU→µm conversion happens here, once, because the LEF states gate area in µm²
 /// while the database states geometry in DBU: comparing them raw is a ~10⁶ error on sky130.
 pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
-    let graph = WireGraph::new(db.net_wire_shapes(net));
-    if graph.is_empty() || graph.layers.is_empty() {
-        return None;
+    let boxes = db.net_wire_boxes(net);
+    if boxes.is_empty() {
+        return None; // unrouted: collects nothing, not an error
     }
-    let dbu2 = dbu * dbu;
 
-    let layer_info: Vec<(String, f64)> = graph
-        .layers
-        .iter()
-        .map(|&n| {
-            let name = db.layer_name_by_number(n);
-            let thick = db.layer_thickness(&name) as f64;
-            (name, thick)
-        })
-        .collect();
-
-    // EVERY terminal is anchored, not only the gates: diffusion accumulates over a conductor's
-    // terminals, and a diode's pin carries diffusion without carrying a gate. Anchoring gates
-    // alone would leave each conductor's diffusion invisible.
-    let mut pins: Vec<String> = Vec::new();
-    let mut gate_areas: Vec<f64> = Vec::new();
-    let mut diff_areas: Vec<f64> = Vec::new();
-    let mut anchors: Vec<usize> = Vec::new();
-    let mut gates_unanchored = 0usize;
+    // Terminals first: the graph cannot be built without their pin metal, because pins cut it.
+    struct Term {
+        name: String,
+        gate: f64,
+        diff: f64,
+        boxes: Vec<LayerBox>,
+    }
+    let mut terms: Vec<Term> = Vec::new();
     let mut diff_area_um2 = 0.0f64;
-
     for iterm in db.net_iterms(net) {
         // iterms are "inst/pin"; hierarchical instance names contain slashes, so split from
         // the RIGHT — splitting at the first slash silently picks the wrong instance.
@@ -257,45 +245,82 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
         let gate = db.mterm_antenna_gate_area(&master, pin);
         let diff = db.mterm_antenna_diff_area(&master, pin);
         diff_area_um2 += diff;
-        if gate <= 0.0 && diff <= 0.0 {
-            continue; // contributes to neither side of the ratio
-        }
-        // Anchor to the metal it touches. Without a location we cannot say which conductor it
-        // is on, and guessing would attribute someone else's metal or diffusion to it.
-        match db.iterm_avg_xy(inst, pin).and_then(|(x, y)| graph.anchor(x, y)) {
-            Some(a) => {
-                pins.push(iterm.clone());
-                gate_areas.push(gate);
-                diff_areas.push(diff);
-                anchors.push(a);
-            }
-            // Only a lost GATE means a gate went unchecked; lost diffusion is a missing
-            // relief, which is conservative rather than silent.
-            None => {
-                if gate > 0.0 {
-                    gates_unanchored += 1;
-                }
-            }
-        }
+        // Every terminal's metal cuts the wire, whether or not it is a gate — a diode's pin
+        // bounds an antenna region exactly as a gate's does.
+        let pin_boxes: Vec<LayerBox> = db
+            .iterm_pin_boxes(inst, pin)
+            .into_iter()
+            .map(|w| LayerBox {
+                layer: w.layer,
+                x0: w.x0,
+                y0: w.y0,
+                x1: w.x1,
+                y1: w.y1,
+                is_routing: true,
+                from_via: false,
+            })
+            .collect();
+        terms.push(Term { name: iterm.clone(), gate, diff, boxes: pin_boxes });
     }
 
+    let all_pins: Vec<LayerBox> = terms.iter().flat_map(|t| t.boxes.iter().copied()).collect();
+    let graph = NetGraph::build(&boxes, &all_pins);
+    if graph.is_empty() || graph.layers.is_empty() {
+        return None;
+    }
+
+    let layer_info: Vec<(String, f64)> = graph
+        .layers
+        .iter()
+        .map(|&n| {
+            let name = db.layer_name_by_number(n);
+            let thick = db.layer_thickness(&name) as f64;
+            (name, thick)
+        })
+        .collect();
+
+    // Attach each terminal to the conductors its own metal touches.
+    let mut attach: Vec<Vec<usize>> = Vec::new();
+    let mut kept: Vec<&Term> = Vec::new();
+    let mut gates_unanchored = 0usize;
+    for t in &terms {
+        if t.gate <= 0.0 && t.diff <= 0.0 {
+            continue; // contributes to neither side of the ratio
+        }
+        let touched = graph.touched_by(&t.boxes);
+        if touched.is_empty() {
+            // Only a lost GATE means a gate went unchecked; lost diffusion is a missing relief,
+            // which is conservative rather than silent.
+            if t.gate > 0.0 {
+                gates_unanchored += 1;
+            }
+            continue;
+        }
+        attach.push(touched);
+        kept.push(t);
+    }
+
+    let dbu2 = dbu * dbu;
     let mut regions: Vec<RegionExposure> = Vec::new();
-    if !anchors.is_empty() {
+    if !attach.is_empty() {
         for (i, &stage) in graph.layers.iter().enumerate() {
             let (name, thick) = &layer_info[i];
-            for (terms, c) in graph.regions_at(stage, &anchors) {
-                // Report only the terminals that are gates — a pin with diffusion and no gate
-                // is not at risk, it is what protects the ones that are.
-                let gate_pins: Vec<String> =
-                    terms.iter().filter(|&&t| gate_areas[t] > 0.0).map(|&t| pins[t].clone()).collect();
+            for (idxs, c) in graph.regions_at(stage, &attach) {
+                // Report only the gates — a pin with diffusion and no gate is not at risk, it
+                // is what protects the ones that are.
+                let gate_pins: Vec<String> = idxs
+                    .iter()
+                    .filter(|&&t| kept[t].gate > 0.0)
+                    .map(|&t| kept[t].name.clone())
+                    .collect();
                 if gate_pins.is_empty() {
                     continue; // a conductor with no gate on it has nothing to damage
                 }
                 regions.push(RegionExposure {
                     layer: name.clone(),
                     layer_number: stage,
-                    gate_area_um2: terms.iter().map(|&t| gate_areas[t]).sum(),
-                    diff_area_um2: terms.iter().map(|&t| diff_areas[t]).sum(),
+                    gate_area_um2: idxs.iter().map(|&t| kept[t].gate).sum(),
+                    diff_area_um2: idxs.iter().map(|&t| kept[t].diff).sum(),
                     pins: gate_pins,
                     area_um2: c.layer_area as f64 / dbu2,
                     // Thickness of 0 means the LEF stated none; the product is then 0, which
