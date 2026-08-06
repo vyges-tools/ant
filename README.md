@@ -101,6 +101,18 @@ only evaluates routing layers. No violation in the golden report is on a cut lay
 **CAR/CSR composition.** OpenROAD keeps separate cumulative chains for wires and vias. Not
 exercised by sky130, which states no cumulative limit.
 
+### One OpenROAD behaviour reproduced deliberately
+
+When a gate belongs to several conductors on one layer, OpenROAD sums their ratios but **not**
+their diffusion areas — `NodeInfo::operator+=` accumulates six fields and leaves
+`iterm_gate_area` and `iterm_diff_area` behind — so the PWL limit is indexed by whichever
+conductor was recorded first. This engine reproduces that, because a checker that disagrees with
+the incumbent is not usable as a cross-check.
+
+Whether it is intended is an open question upstream:
+**[OpenROAD #11082](https://github.com/The-OpenROAD-Project/OpenROAD/issues/11082)**. If it turns
+out to be deliberate this note becomes the documentation; if not, this engine follows the fix.
+
 ### How the model was arrived at
 
 Worth stating because two plausible models were wrong first:
