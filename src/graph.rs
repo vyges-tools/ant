@@ -260,6 +260,11 @@ impl NetGraph {
         self.conductors.is_empty()
     }
 
+    /// One conductor, by index — for diagnosis of what a terminal attached to.
+    pub fn conductor(&self, i: usize) -> &Conductor {
+        &self.conductors[i]
+    }
+
     /// Conductors a pin's own metal touches — its own layer, or one step either way.
     ///
     /// A 1-DBU halo so abutment counts, matching OpenROAD's `findNodesWithIntersection`, which
