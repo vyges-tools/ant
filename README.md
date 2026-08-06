@@ -74,27 +74,32 @@ Correlated against OpenROAD `check_antennas` on a routed sky130 block (~2500 net
 
 | | |
 | --- | --- |
-| Violations matched exactly (net + pin + layer + ratio) | **76 of 83** |
-| Violations OpenROAD does not confirm | **1** |
-| Ratio values within 2% of OpenROAD's | **76 of 77** compared |
-| Limit disagreements | **none** — all 77 shared records agree exactly |
+| Violations found | **83 of 83** — none missed |
+| Violations OpenROAD does not confirm | **0** |
+| Limit disagreements | **none** — all 83 agree exactly |
+| Ratio values within 2% | 80 of 83 |
 
-Runs in ~2.5 s / 194 MB on that block.
+Every violation OpenROAD reports on that block, this engine reports, on the same net, pin, layer
+and ratio — and nothing more. It runs in ~2.5 s.
 
-A flagged net is strong evidence and a clean run is good evidence. **Still not a formal sign-off
-gate**: 7 real violations are missed, so run `check_antennas` before a tapeout. But the two
-engines now agree on what they both see, to the decimal.
+**That is verdict parity on one design, which is not the same as being a sign-off tool.** Three
+of the 83 values still differ materially (worst: 10713.7 against 3756.9), and they agree on the
+*verdict* only because they land on the correct side of their limit anyway. On another design
+those could flip. Treat this as a strong screen and a good cross-check; run `check_antennas` for
+sign-off until the correlation is repeated on more blocks.
 
-### What is still missing
+### What is still divergent
 
-**Cut layers are not checked.** OpenROAD evaluates `mcon`/`via`/`via2` against their own ratios
-(`calculateViaPar`); this engine builds cut-layer geometry — it needs it for connectivity — but
-only evaluates routing layers. No violation in the golden report is on a cut layer, so this costs
-nothing here and is still a real gap.
+**Three values.** Two conductors' worth of metal is being attributed slightly differently on
+those nets. Diagnosed far enough to know it is attribution, not arithmetic — the limits match
+exactly and 80 of 83 values are identical.
 
-**CAR/CSR are computed differently.** OpenROAD sums the per-layer *ratios* and keeps separate
-chains for wires and vias; this engine takes the ratio of cumulative areas. Unexercised on
-sky130, which states no cumulative limit.
+**Cut layers are not evaluated.** OpenROAD checks `mcon`/`via`/`via2` against their own ratios
+(`calculateViaPar`); this engine builds cut-layer geometry, because connectivity needs it, but
+only evaluates routing layers. No violation in the golden report is on a cut layer.
+
+**CAR/CSR composition.** OpenROAD keeps separate cumulative chains for wires and vias. Not
+exercised by sky130, which states no cumulative limit.
 
 ### How the model was arrived at
 
