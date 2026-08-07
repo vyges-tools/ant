@@ -28,7 +28,7 @@
 //! `check_antennas` and all three were wrong. This model reproduced OpenROAD to one decimal on
 //! the net that defeated the others — 535.1 against 535.1.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use vyges_opendb::LayerBox;
 
 /// Union-find over conductor indices.
@@ -205,11 +205,17 @@ pub struct NetGraph {
 impl NetGraph {
     /// Build from a net's decomposed boxes, cut by every terminal's pin metal.
     pub fn build(boxes: &[LayerBox], pin_boxes: &[LayerBox]) -> NetGraph {
-        let mut by_layer: HashMap<i64, (Vec<(i32, i32, i32, i32)>, bool)> = HashMap::new();
+        // BTreeMap, not HashMap: this map is ITERATED below, and the iteration order decides the
+        // order conductors are pushed — hence their indices, hence their union-find roots, hence
+        // every downstream grouping. Rust's HashMap is randomly seeded per process, so with a
+        // HashMap here the same database produced a different answer on each run. See the note on
+        // `by_root` in `regions_at` for what that cost.
+        let mut by_layer: BTreeMap<i64, (Vec<(i32, i32, i32, i32)>, bool)> = BTreeMap::new();
         for b in boxes {
             let e = by_layer.entry(b.layer).or_insert((Vec::new(), b.is_routing));
             e.0.push((b.x0, b.y0, b.x1, b.y1));
         }
+        // Only ever looked up by key, never iterated — a HashMap is fine here.
         let mut pins_by_layer: HashMap<i64, Vec<(i32, i32, i32, i32)>> = HashMap::new();
         for p in pin_boxes {
             pins_by_layer.entry(p.layer).or_default().push((p.x0, p.y0, p.x1, p.y1));
@@ -301,7 +307,16 @@ impl NetGraph {
                 uf.union(a, b);
             }
         }
-        let mut by_root: HashMap<u32, Vec<usize>> = HashMap::new();
+        // BTreeMap, not HashMap: the returned Vec is in this map's iteration order, and that
+        // order is load-bearing. `check_net` accumulates per (pin, layer, ratio) and takes the
+        // LIMIT from the FIRST region it sees — deliberately, to match OpenROAD's
+        // `NodeInfo::operator+=`, which keeps whichever node was recorded first. That is only a
+        // faithful reproduction if "first" is well defined; under a randomly-seeded HashMap it
+        // was not. Measured on a routed openframe wrapper: 10 identical runs returned 135, 136
+        // or 137 violations, with two nets appearing and vanishing — not borderline ones, but
+        // nets 32% and 56% over the limit, whose recorded limit changed with the winning region.
+        // A sign-off checker that answers differently on the same input is not a gate.
+        let mut by_root: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for (t, touched) in attach.iter().enumerate() {
             let mut roots: Vec<u32> =
                 touched.iter().filter(|&&i| live(i)).map(|&i| uf.find(i as u32)).collect();
@@ -532,5 +547,47 @@ mod tests {
             assert_eq!(terms.len(), 1, "neither terminal pools with the other");
             assert_eq!(c.layer_area, 300, "each sees only its own 30x10 piece");
         }
+    }
+
+    /// **A stable answer is part of the contract.** `regions_at` returns groups in map-iteration
+    /// order, and `check_net` takes each accumulator's LIMIT from the FIRST region it sees —
+    /// deliberately, to reproduce OpenROAD's `NodeInfo::operator+=`, which keeps whichever node
+    /// was recorded first. That is only a faithful reproduction if "first" is well defined.
+    ///
+    /// It was not: `by_layer` and `by_root` were `HashMap`s, and Rust seeds those randomly per
+    /// process. The same routed database therefore gave a different answer on every run — 10
+    /// runs over an openframe wrapper returned 135, 136 or 137 violations, with two nets
+    /// appearing and vanishing. Not marginal ones: 32% and 56% over the limit, dropped because a
+    /// different region won the `or_insert` and supplied a different diffusion-dependent limit.
+    ///
+    /// Asserted as an exact order rather than merely "stable", because two runs inside ONE
+    /// process share a seed and would agree even with a HashMap — only a fixed expected order
+    /// catches the regression.
+    #[test]
+    fn regions_come_back_in_a_defined_order() {
+        // Three disjoint conductors, one per layer, each with its own terminal. Distinct areas
+        // make the order observable in the result itself.
+        let g = NetGraph::build(
+            &[bx(1, 0, 10, true), bx(3, 0, 20, true), bx(5, 0, 30, true)],
+            &[],
+        );
+        assert_eq!(g.conductors.len(), 3, "one conductor per layer, none touching");
+
+        let t1 = g.touched_by(&[bx(1, 1, 2, true)]);
+        let t3 = g.touched_by(&[bx(3, 1, 2, true)]);
+        let t5 = g.touched_by(&[bx(5, 1, 2, true)]);
+
+        // At the top stage every layer is present, so all three groups come back.
+        let areas: Vec<i64> = g
+            .regions_at(5, &[t1, t3, t5])
+            .iter()
+            .map(|(_, c)| c.cumulative_area)
+            .collect();
+        assert_eq!(
+            areas,
+            vec![100, 200, 300],
+            "groups must come back in ascending conductor order (layer 1, 3, 5) — a HashMap here \
+             randomises this per process and the whole check stops being reproducible"
+        );
     }
 }
