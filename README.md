@@ -70,29 +70,35 @@ A plain-ratios-only checker sees no limits there at all.
 ## Maturity — measured, not claimed
 
 Correlated against OpenROAD `check_antennas` on a routed sky130 block (~2500 nets, the same
-`.odb`, 2026-08-05):
+`.odb`). **Re-measured 2026-08-07 on a deterministic build and against a freshly regenerated
+oracle**, which changed the result — see below.
 
-| | |
-| --- | --- |
-| Violations found | **83 of 83** — none missed |
-| Violations OpenROAD does not confirm | **0** |
-| Limit disagreements | **none** — all 83 agree exactly |
-| Ratio values within 2% | 80 of 83 |
+| against | violations | matched | missed | added | values within 2% |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `check_antennas` **as run on the design, 2026-05-26** | 83 | **82** | 1 | **0** | 80 of 82 |
+| `check_antennas` **re-run today, current build** | 76 | 72 | 4 | 10 | 71 of 72 |
 
-Every violation OpenROAD reports on that block, this engine reports, on the same net, pin, layer
-and ratio — and nothing more. It runs in ~2.5 s.
+**The two OpenROAD runs disagree with each other**, on the same `.odb`: 83 violations then, 76
+now — 73 in common, 10 that only the older build reports, 3 that only the current one does. So
+"which answer is correct" is not settled, and this engine cannot be more correct than the
+reference it is compared against.
 
-**That is verdict parity on one design, which is not the same as being a sign-off tool.** Three
-of the 83 values still differ materially (worst: 10713.7 against 3756.9), and they agree on the
-*verdict* only because they land on the correct side of their limit anyway. On another design
-those could flip. Treat this as a strong screen and a good cross-check; run `check_antennas` for
-sign-off until the correlation is repeated on more blocks.
+Read the two rows together: **every one of the 10 violations this engine reports that the current
+build does not is a violation the older build did report.** Three of its four misses are the three
+the current build newly added. Net of the reference's own movement, the standing difference is a
+single missed violation.
+
+**Treat this as a strong screen, not a sign-off gate.** Run `check_antennas` for sign-off, and if
+the two disagree, check which build you are comparing against before assuming either is wrong.
+The engine is deterministic — the same `.odb` returns a byte-identical violation set across runs
+— which was **not** true before 2026-08-06.
 
 ### What is still divergent
 
-**Three values.** Two conductors' worth of metal is being attributed slightly differently on
-those nets. Diagnosed far enough to know it is attribution, not arithmetic — the limits match
-exactly and 80 of 83 values are identical.
+**A small number of values.** Some metal is attributed slightly differently on those nets.
+Diagnosed far enough to know it is attribution, not arithmetic — the limits match exactly and
+the large majority of values are identical (80 of 82 against the 2026-05-26 reference, 71 of 72
+against today's).
 
 **Cut layers are not evaluated.** OpenROAD checks `mcon`/`via`/`via2` against their own ratios
 (`calculateViaPar`); this engine builds cut-layer geometry, because connectivity needs it, but
