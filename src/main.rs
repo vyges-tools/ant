@@ -38,7 +38,7 @@ const DESCRIBE: &str = r#"{
       "input_hash covers the argument vector, not the content of the .odb it names.",
       "Both the plain and the diffusion-dependent (PWL) LEF ratio forms are read; where a technology states a diff curve it takes precedence, and outside the curve's stated range the limit is clamped rather than extrapolated.",
       "A ratio the technology states in neither form is not checked. On sky130 only DiffPSR is stated, so PAR, CAR and CSR are unlimited there; layers_without_rules and no_rules_found report this rather than leaving it implied by the exit code.",
-      "Correlated against OpenROAD check_antennas on a routed sky130 block: 76 of 83 violations matched exactly, 1 unconfirmed, 76 of 77 compared values within 2%, and every shared record agreeing on the limit. 7 real violations are still missed, so this is not yet a formal sign-off gate -- run check_antennas before a tapeout -- but the two engines agree to the decimal on what they both see.",
+      "Correlated against OpenROAD check_antennas on a routed sky130 block (~2500 nets, same .odb, 2026-08-05): 83 of 83 violations found with none missed and none added, every limit agreeing exactly, and 80 of 83 ratio values within 2%. That is verdict parity on ONE design, which is not the same as being a sign-off tool: three values still differ materially (worst 10713.7 against 3756.9) and agree on the verdict only because they land on the correct side of their limit anyway -- on another design those could flip. Treat it as a strong screen and a cross-check; run check_antennas for sign-off until the correlation is repeated on more blocks.",
       "The ratio is charged per CONDUCTOR: metal reachable from the gates over layers at or below the one being deposited, divided by the summed gate area of the gates on that conductor. Measured as the exact union of the rectangles, so overlap and abutment count once.",
       "The diffusion-dependent limit is indexed by each conductor's own diffusion, matching OpenROAD's per-node iterm_diff_area. Every terminal is anchored to a conductor, not only the gates, since a diode pin carries diffusion without carrying a gate.",
       "The conductor graph follows AntennaChecker: vias decomposed onto the layers they occupy, pin metal subtracted so pins cut the wire into antenna regions, components labelled per layer, layers joined through the cut between them, and terminals attached to the fragments their own pin boxes touch.",
@@ -274,5 +274,38 @@ mod describe_tests {
             .as_array()
             .expect("provenance_limitations is an array");
         assert!(!limits.is_empty(), "the schema requires provenance_limitations");
+    }
+
+    /// The descriptor's correlation figures must also appear in the README.
+    ///
+    /// They drifted: when the engine went from 76-of-83 to verdict parity at 83-of-83, the README
+    /// was updated and this descriptor was not. The README is the human-facing claim, but the
+    /// DESCRIPTOR is what agents, the MCP layer and the generated CLI reference consume — so the
+    /// stale, worse numbers were the ones that travelled, and they reached the public website.
+    ///
+    /// Deliberately a CONTAINMENT check on the numbers, not a match on wording. The two texts
+    /// should read differently; they must not disagree on a measurement.
+    #[test]
+    fn the_descriptors_correlation_agrees_with_the_readme() {
+        let readme = include_str!("../README.md");
+        let d: serde_json::Value = serde_json::from_str(DESCRIBE).expect("valid JSON");
+        let line = d["provenance_limitations"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|x| x.as_str())
+            .find(|s| s.starts_with("Correlated against OpenROAD"))
+            .expect("a correlation entry");
+
+        let nums: Vec<&str> = line
+            .split(|c: char| !c.is_ascii_digit() && c != '.')
+            .filter(|s| s.len() > 1 && s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            .collect();
+        let missing: Vec<&str> = nums.iter().copied().filter(|n| !readme.contains(n)).collect();
+        assert!(
+            missing.is_empty(),
+            "the descriptor states figures the README does not: {missing:?}\n\
+             one of the two is stale, and the descriptor is the one that travels"
+        );
     }
 }
