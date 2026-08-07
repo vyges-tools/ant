@@ -60,12 +60,12 @@ const DESCRIBE: &str = r#"{
       "out": { "type": "string", "description": "write the report to FILE instead of stdout" }
     }
   },
-  "consumes": [ { "role": "odb", "field": "odb" } ],
+  "consumes": ["odb"],
   "artifacts": [ { "role": "antenna_report", "field": "report_path" } ],
   "assertion": {
     "id": "antenna-clean",
     "field": "status",
-    "pass_when": { "equals": "clean" }
+    "pass_when": { "eq": "clean" }
   }
 }
 "#;
@@ -219,5 +219,60 @@ fn main() -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod describe_tests {
+    use super::DESCRIBE;
+
+    /// The descriptor must satisfy `vyges-tool-descriptor/1.1`, the schema baked into vyges-mcp.
+    ///
+    /// Both failures pinned here shipped in v0.1.28, because this engine was absent from
+    /// verify-coverage.sh's list and nothing validated it:
+    ///
+    ///   * `consumes` held objects; the schema says an array of role STRINGS.
+    ///   * `pass_when` used `equals`, which is not a predicate the schema defines. The cost is
+    ///     spelled out in the schema itself — "an unrecognized spec is not a usable assertion and
+    ///     is dropped, so the result resolves `unknown` rather than being guessed into a pass".
+    ///     A malformed assertion does not fail loudly; the verdict silently stops existing.
+    ///
+    /// Checked here rather than only in the release gate so the loop closes at `cargo test`,
+    /// where whoever edits the descriptor is standing.
+    #[test]
+    fn the_descriptor_matches_the_schema_contract() {
+        let d: serde_json::Value = serde_json::from_str(DESCRIBE).expect("descriptor is valid JSON");
+
+        assert_eq!(d["schema"], "vyges-tool-descriptor/1.1");
+
+        // consumes: role strings, never objects
+        let consumes = d["consumes"].as_array().expect("consumes is an array");
+        assert!(
+            consumes.iter().all(|c| c.is_string()),
+            "consumes must be role STRINGS, got {consumes:?}"
+        );
+
+        // assertion: exactly one recognised predicate
+        let pw = d["assertion"]["pass_when"]
+            .as_object()
+            .expect("pass_when is an object");
+        assert_eq!(pw.len(), 1, "exactly one predicate, got {pw:?}");
+        let key = pw.keys().next().unwrap().as_str();
+        assert!(
+            matches!(key, "is_true" | "eq" | "lte"),
+            "`{key}` is not a predicate the schema defines (is_true | eq | lte) — an \
+             unrecognised one is dropped and the verdict resolves `unknown`"
+        );
+
+        // the field the assertion reads, and the values it is asserted against, must be real
+        assert_eq!(d["assertion"]["field"], "status");
+        assert_eq!(
+            pw["eq"], "clean",
+            "Report::status is \"clean\" or \"violations\" (see lib.rs)"
+        );
+        let limits = d["provenance_limitations"]
+            .as_array()
+            .expect("provenance_limitations is an array");
+        assert!(!limits.is_empty(), "the schema requires provenance_limitations");
     }
 }
