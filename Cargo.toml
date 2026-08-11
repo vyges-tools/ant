@@ -1,6 +1,6 @@
 [package]
 name = "vyges-ant"
-version = "0.1.29"
+version = "0.1.30"
 edition = "2021"
 description = "Antenna ratio sign-off over the routed OpenDB database (PAR/CAR/PSR/CSR), with diode-plan emission."
 license = "Apache-2.0"
