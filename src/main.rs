@@ -9,13 +9,13 @@ use vyges_ant::check_design;
 use vyges_opendb::Db;
 
 const USAGE: &str = "\
-vyges-ant — antenna ratio sign-off over the routed design database
+vyges loom ant — antenna ratio sign-off over the routed design database
 
 USAGE:
-  vyges-ant check <design.odb> [-o FILE] [--json]
-  vyges-ant explain <design.odb> --net NAME
-  vyges-ant --describe
-  vyges-ant --help
+  vyges loom ant check <design.odb> [-o FILE] [--json]
+  vyges loom ant explain <design.odb> --net NAME
+  vyges loom ant --describe
+  vyges loom ant --help
 
 OPTIONS:
   --net NAME            (explain) dump one net's per-gate, per-stage attribution
