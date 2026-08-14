@@ -88,7 +88,7 @@ pub mod graph;
 
 use graph::NetGraph;
 use serde::Serialize;
-use vyges_opendb::{DiffCurve, Db, LayerBox};
+use vyges_opendb::{Db, DiffCurve, LayerBox};
 
 /// Which ratio a violation is against. The four are checked independently: a net can pass PAR
 /// and fail CAR, which is the whole reason the cumulative form exists.
@@ -237,7 +237,9 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
     for iterm in db.net_iterms(net) {
         // iterms are "inst/pin"; hierarchical instance names contain slashes, so split from
         // the RIGHT — splitting at the first slash silently picks the wrong instance.
-        let Some((inst, pin)) = iterm.rsplit_once('/') else { continue };
+        let Some((inst, pin)) = iterm.rsplit_once('/') else {
+            continue;
+        };
         let master = db.inst_master(inst);
         if master.is_empty() {
             continue;
@@ -260,7 +262,12 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
                 from_via: false,
             })
             .collect();
-        terms.push(Term { name: iterm.clone(), gate, diff, boxes: pin_boxes });
+        terms.push(Term {
+            name: iterm.clone(),
+            gate,
+            diff,
+            boxes: pin_boxes,
+        });
     }
 
     let all_pins: Vec<LayerBox> = terms.iter().flat_map(|t| t.boxes.iter().copied()).collect();
@@ -333,7 +340,12 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
         }
     }
 
-    Some(NetAntenna { net: net.to_string(), diff_area_um2, regions, gates_unanchored })
+    Some(NetAntenna {
+        net: net.to_string(),
+        diff_area_um2,
+        regions,
+        gates_unanchored,
+    })
 }
 
 /// A piecewise-linear antenna limit: `(diffusion area µm², ratio limit)` points, ascending.
@@ -375,13 +387,21 @@ impl Pwl {
                         let span = x1 - x0;
                         // Coincident indices would divide by zero; take the left value, which
                         // is what a step at that point means.
-                        return Some(if span == 0.0 { y0 } else { y0 + (y1 - y0) * (x - x0) / span });
+                        return Some(if span == 0.0 {
+                            y0
+                        } else {
+                            y0 + (y1 - y0) * (x - x0) / span
+                        });
                     }
                 }
                 // Past the last point: continue along the final segment.
                 let ((x0, y0), (x1, y1)) = (p[p.len() - 2], p[p.len() - 1]);
                 let span = x1 - x0;
-                Some(if span == 0.0 { y1 } else { y1 + (y1 - y0) * (x - x1) / span })
+                Some(if span == 0.0 {
+                    y1
+                } else {
+                    y1 + (y1 - y0) * (x - x1) / span
+                })
             }
         }
     }
@@ -587,17 +607,21 @@ pub fn check_net(
     out: &mut Vec<Violation>,
 ) {
     // A gate that lands on several conductors of one layer is judged on the SUM of their
-    // ratios, each computed against that conductor's own denominator — OpenROAD's
-    // `gate_info[iterm][layer] += info`. Merging the conductors and dividing once instead gives
-    // a smaller answer: measured on `tl_cpu_h2d[83]`, 336.9 against OpenROAD's 484.9.
+    // ratios, each computed against that conductor's own denominator. Conductors a gate's own
+    // pin metal bridges are no longer several: `regions_at` merges those into one, so the sum
+    // here is over conductors that are genuinely disjoint.
     //
-    // ⚠️ The limit comes from the FIRST conductor's diffusion, not the sum. That is what
-    // OpenROAD does — `NodeInfo::operator+=` accumulates the ratios and the areas but leaves
-    // `iterm_diff_area` and `iterm_gate_area` untouched, so the merged record keeps whichever
-    // node was recorded first. Every other field in that struct accumulates, so this looks like
-    // an oversight rather than a decision. Reproduced deliberately, because a checker that
-    // disagrees with the incumbent is not usable as a cross-check — and raised upstream rather
-    // than silently enshrined.
+    // ℹ️ The limit is the region's own diffusion. This engine formerly took it from whichever
+    // conductor was seen FIRST, reproducing `NodeInfo::operator+=`, which accumulated the ratios
+    // and areas but left `iterm_diff_area` and `iterm_gate_area` untouched. That was raised as
+    // OpenROAD issue #11082 rather than silently enshrined, and PR #11125 replaced it with the
+    // order-independent union this engine now implements — nodes bridged by a shared terminal
+    // merged, each terminal counted once, every gate of a group sharing one record.
+    //
+    // ⚠️ **Correlation numbers taken before that fix do not carry over.** The measurement made
+    // at the time predicts the size of it: merging and dividing once gave 336.9 on
+    // `tl_cpu_h2d[83]` where the pre-fix OpenROAD reported 484.9. A baseline for this engine has
+    // to come from a build containing PR #11125.
     struct Acc {
         value: f64,
         limit: f64,
@@ -609,7 +633,9 @@ pub fn check_net(
     let mut acc: std::collections::BTreeMap<(String, String, u8), Acc> = Default::default();
 
     for rg in &net.regions {
-        let Some(r) = rules.get(&rg.layer).filter(|r| r.has_any_limit()) else { continue };
+        let Some(r) = rules.get(&rg.layer).filter(|r| r.has_any_limit()) else {
+            continue;
+        };
         for (kind, ratio, metal) in [
             (0u8, Ratio::Par, rg.area_um2),
             (1, Ratio::Car, rg.cum_area_um2),
@@ -630,7 +656,7 @@ pub fn check_net(
                     .entry((pin.clone(), rg.layer.clone(), kind))
                     .or_insert(Acc {
                         value: 0.0,
-                        limit, // first conductor's limit — see the note above
+                        limit, // the region's own — see the note above
                         gate_area_um2: rg.gate_area_um2,
                         diff_area_um2: rg.diff_area_um2,
                         metal_area_um2: 0.0,

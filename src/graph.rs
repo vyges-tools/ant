@@ -38,7 +38,9 @@ struct UnionFind {
 
 impl UnionFind {
     fn new(n: usize) -> Self {
-        Self { parent: (0..n as u32).collect() }
+        Self {
+            parent: (0..n as u32).collect(),
+        }
     }
     fn find(&mut self, mut i: u32) -> u32 {
         while self.parent[i as usize] != i {
@@ -72,9 +74,19 @@ struct Grid {
 impl Grid {
     /// Cells covered by `add`, minus cells covered by `sub`.
     fn build(add: &[(i32, i32, i32, i32)], sub: &[(i32, i32, i32, i32)]) -> Grid {
-        let live: Vec<_> = add.iter().copied().filter(|r| r.2 > r.0 && r.3 > r.1).collect();
+        let live: Vec<_> = add
+            .iter()
+            .copied()
+            .filter(|r| r.2 > r.0 && r.3 > r.1)
+            .collect();
         if live.is_empty() {
-            return Grid { xs: vec![], ys: vec![], nx: 0, ny: 0, covered: vec![] };
+            return Grid {
+                xs: vec![],
+                ys: vec![],
+                nx: 0,
+                ny: 0,
+                covered: vec![],
+            };
         }
         // Subtracted edges join the coordinate set, so a partial overlap cuts exactly rather
         // than being rounded to whole boxes.
@@ -91,7 +103,13 @@ impl Grid {
         ys.sort_unstable();
         ys.dedup();
         let (nx, ny) = (xs.len() - 1, ys.len() - 1);
-        let mut g = Grid { xs, ys, nx, ny, covered: vec![false; nx * ny] };
+        let mut g = Grid {
+            xs,
+            ys,
+            nx,
+            ny,
+            covered: vec![false; nx * ny],
+        };
         for r in &live {
             g.paint(*r, true);
         }
@@ -114,7 +132,10 @@ impl Grid {
     }
 
     fn cell_size(&self, i: usize, j: usize) -> (i64, i64) {
-        ((self.xs[i + 1] - self.xs[i]) as i64, (self.ys[j + 1] - self.ys[j]) as i64)
+        (
+            (self.xs[i + 1] - self.xs[i]) as i64,
+            (self.ys[j + 1] - self.ys[j]) as i64,
+        )
     }
 
     /// Total length of this cell's edges facing something outside `member`.
@@ -129,10 +150,18 @@ impl Grid {
         };
         let (i, j) = (i as isize, j as isize);
         let mut p = 0;
-        if !inside(i - 1, j) { p += dy; }
-        if !inside(i + 1, j) { p += dy; }
-        if !inside(i, j - 1) { p += dx; }
-        if !inside(i, j + 1) { p += dx; }
+        if !inside(i - 1, j) {
+            p += dy;
+        }
+        if !inside(i + 1, j) {
+            p += dy;
+        }
+        if !inside(i, j - 1) {
+            p += dx;
+        }
+        if !inside(i, j + 1) {
+            p += dx;
+        }
         p
     }
 }
@@ -212,13 +241,18 @@ impl NetGraph {
         // `by_root` in `regions_at` for what that cost.
         let mut by_layer: BTreeMap<i64, (Vec<(i32, i32, i32, i32)>, bool)> = BTreeMap::new();
         for b in boxes {
-            let e = by_layer.entry(b.layer).or_insert((Vec::new(), b.is_routing));
+            let e = by_layer
+                .entry(b.layer)
+                .or_insert((Vec::new(), b.is_routing));
             e.0.push((b.x0, b.y0, b.x1, b.y1));
         }
         // Only ever looked up by key, never iterated — a HashMap is fine here.
         let mut pins_by_layer: HashMap<i64, Vec<(i32, i32, i32, i32)>> = HashMap::new();
         for p in pin_boxes {
-            pins_by_layer.entry(p.layer).or_default().push((p.x0, p.y0, p.x1, p.y1));
+            pins_by_layer
+                .entry(p.layer)
+                .or_default()
+                .push((p.x0, p.y0, p.x1, p.y1));
         }
 
         let mut conductors = Vec::new();
@@ -237,12 +271,21 @@ impl NetGraph {
                     perimeter += g.exposed_edges(i, j, &member);
                     cells.push((g.xs[i], g.ys[j], g.xs[i + 1], g.ys[j + 1]));
                 }
-                conductors.push(Conductor { layer, is_routing, area, perimeter, cells });
+                conductors.push(Conductor {
+                    layer,
+                    is_routing,
+                    area,
+                    perimeter,
+                    cells,
+                });
             }
         }
 
-        let mut layers: Vec<i64> =
-            conductors.iter().filter(|c| c.is_routing).map(|c| c.layer).collect();
+        let mut layers: Vec<i64> = conductors
+            .iter()
+            .filter(|c| c.is_routing)
+            .map(|c| c.layer)
+            .collect();
         layers.sort_unstable();
         layers.dedup();
 
@@ -259,7 +302,11 @@ impl NetGraph {
                 }
             }
         }
-        NetGraph { conductors, layers, links }
+        NetGraph {
+            conductors,
+            layers,
+            links,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -307,19 +354,36 @@ impl NetGraph {
                 uf.union(a, b);
             }
         }
-        // BTreeMap, not HashMap: the returned Vec is in this map's iteration order, and that
-        // order is load-bearing. `check_net` accumulates per (pin, layer, ratio) and takes the
-        // LIMIT from the FIRST region it sees — deliberately, to match OpenROAD's
-        // `NodeInfo::operator+=`, which keeps whichever node was recorded first. That is only a
-        // faithful reproduction if "first" is well defined; under a randomly-seeded HashMap it
-        // was not. Measured on a routed openframe wrapper: 10 identical runs returned 135, 136
-        // or 137 violations, with two nets appearing and vanishing — not borderline ones, but
-        // nets 32% and 56% over the limit, whose recorded limit changed with the winning region.
-        // A sign-off checker that answers differently on the same input is not a gate.
+        // 🔑 **A terminal bridges every conductor it touches into one region.** A pin's own metal
+        // is a physical piece of metal, so two same-layer stubs that both reach it are one
+        // conductor whatever the routing looks like. Merging them transitively is what makes the
+        // answer independent of the order regions are visited in.
+        //
+        // ℹ️ This engine formerly reproduced OpenROAD's older behaviour, where such nodes stayed
+        // apart and the merged record kept whichever was seen first — `NodeInfo::operator+=`
+        // accumulated the ratios and areas but not `iterm_diff_area`. That was raised upstream as
+        // issue #11082 and fixed in PR #11125, which replaced it with exactly the union below.
+        // The old behaviour is why the map underneath had to be a BTreeMap: "first" is only
+        // meaningful if it is well defined, and under a randomly-seeded HashMap it was not —
+        // ten identical runs on a routed openframe wrapper returned 135, 136 or 137 violations.
+        // The determinism no longer rests on iteration order, but the ordered map is kept: a
+        // sign-off checker should not report in an order that varies between runs.
+        for touched in attach {
+            let mut live_touched = touched.iter().copied().filter(|&i| live(i));
+            if let Some(first) = live_touched.next() {
+                for i in live_touched {
+                    uf.union(first as u32, i as u32);
+                }
+            }
+        }
+
         let mut by_root: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for (t, touched) in attach.iter().enumerate() {
-            let mut roots: Vec<u32> =
-                touched.iter().filter(|&&i| live(i)).map(|&i| uf.find(i as u32)).collect();
+            let mut roots: Vec<u32> = touched
+                .iter()
+                .filter(|&&i| live(i))
+                .map(|&i| uf.find(i as u32))
+                .collect();
             roots.sort_unstable();
             roots.dedup();
             for r in roots {
@@ -376,10 +440,18 @@ fn label_components(g: &Grid) -> Vec<Vec<usize>> {
                     stack.push(n);
                 }
             };
-            if i > 0 { visit(i - 1, j, &mut stack, &mut seen); }
-            if i + 1 < g.nx { visit(i + 1, j, &mut stack, &mut seen); }
-            if j > 0 { visit(i, j - 1, &mut stack, &mut seen); }
-            if j + 1 < g.ny { visit(i, j + 1, &mut stack, &mut seen); }
+            if i > 0 {
+                visit(i - 1, j, &mut stack, &mut seen);
+            }
+            if i + 1 < g.nx {
+                visit(i + 1, j, &mut stack, &mut seen);
+            }
+            if j > 0 {
+                visit(i, j - 1, &mut stack, &mut seen);
+            }
+            if j + 1 < g.ny {
+                visit(i, j + 1, &mut stack, &mut seen);
+            }
         }
         comp.sort_unstable();
         out.push(comp);
@@ -392,7 +464,15 @@ mod tests {
     use super::*;
 
     fn bx(layer: i64, x0: i32, x1: i32, routing: bool) -> LayerBox {
-        LayerBox { layer, x0, y0: 0, x1, y1: 10, is_routing: routing, from_via: false }
+        LayerBox {
+            layer,
+            x0,
+            y0: 0,
+            x1,
+            y1: 10,
+            is_routing: routing,
+            from_via: false,
+        }
     }
 
     // ---- union geometry ---------------------------------------------------------------
@@ -406,12 +486,19 @@ mod tests {
     #[test]
     fn abutting_run_measures_as_one_wire() {
         let pieces: Vec<_> = (0..10).map(|i| (i * 10, 0, i * 10 + 10, 4)).collect();
-        assert_eq!(union_area_perimeter(&pieces), (400, 208), "not 280, which counts the joins");
+        assert_eq!(
+            union_area_perimeter(&pieces),
+            (400, 208),
+            "not 280, which counts the joins"
+        );
     }
 
     #[test]
     fn overlapping_rects_are_counted_once() {
-        assert_eq!(union_area_perimeter(&[(0, 0, 10, 10), (5, 0, 15, 10)]), (150, 50));
+        assert_eq!(
+            union_area_perimeter(&[(0, 0, 10, 10), (5, 0, 15, 10)]),
+            (150, 50)
+        );
     }
 
     #[test]
@@ -451,7 +538,11 @@ mod tests {
 
         let g = NetGraph::build(&[bx(5, 0, 100, true)], &[bx(5, 40, 60, true)]);
         assert_eq!(g.conductors.len(), 2, "the pin splits it in two");
-        assert_eq!(g.conductors.iter().map(|c| c.area).sum::<i64>(), 800, "the pin's 200 is gone");
+        assert_eq!(
+            g.conductors.iter().map(|c| c.area).sum::<i64>(),
+            800,
+            "the pin's 200 is gone"
+        );
     }
 
     /// Subtraction is exact, not whole-box: a pin overlapping part of a box removes that part.
@@ -459,7 +550,10 @@ mod tests {
     fn a_partial_overlap_cuts_exactly() {
         let g = NetGraph::build(&[bx(5, 0, 100, true)], &[bx(5, 90, 200, true)]);
         assert_eq!(g.conductors.len(), 1);
-        assert_eq!(g.conductors[0].area, 900, "90x10 left — not 0, and not 1000");
+        assert_eq!(
+            g.conductors[0].area, 900,
+            "90x10 left — not 0, and not 1000"
+        );
     }
 
     // ---- vertical structure -------------------------------------------------------------
@@ -475,12 +569,22 @@ mod tests {
         ];
         let g = NetGraph::build(&boxes, &[]);
         let touched = g.touched_by(&[bx(3, 0, 5, true)]);
-        assert!(!touched.is_empty(), "the li1 enclosure is there to be touched");
+        assert!(
+            !touched.is_empty(),
+            "the li1 enclosure is there to be touched"
+        );
 
         let regions = g.regions_at(5, &[touched.clone()]);
         assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0].1.cumulative_area, 200 + 1000, "li1 + met1; the cut is not metal");
-        assert_eq!(regions[0].1.layer_area, 1000, "met1 alone at the met1 stage");
+        assert_eq!(
+            regions[0].1.cumulative_area,
+            200 + 1000,
+            "li1 + met1; the cut is not metal"
+        );
+        assert_eq!(
+            regions[0].1.layer_area, 1000,
+            "met1 alone at the met1 stage"
+        );
 
         // At stage 3 only li1 exists yet.
         assert_eq!(g.regions_at(3, &[touched])[0].1.cumulative_area, 200);
@@ -491,7 +595,11 @@ mod tests {
     fn cut_layers_carry_connection_not_metal() {
         let g = NetGraph::build(&[bx(4, 0, 50, false), bx(5, 0, 50, true)], &[]);
         let touched = g.touched_by(&[bx(5, 0, 10, true)]);
-        assert_eq!(g.regions_at(5, &[touched])[0].1.cumulative_area, 500, "the cut's 500 is out");
+        assert_eq!(
+            g.regions_at(5, &[touched])[0].1.cumulative_area,
+            500,
+            "the cut's 500 is out"
+        );
     }
 
     // ---- attachment ---------------------------------------------------------------------
@@ -503,13 +611,17 @@ mod tests {
         assert!(g.touched_by(&[bx(5, 500, 520, true)]).is_empty());
     }
 
-    /// A terminal touching two conductors belongs to **both**, and does not merge them.
+    /// A terminal touching two conductors **merges** them into one region.
     ///
-    /// OpenROAD keeps such nodes distinct and sums the gate's per-node ratios afterwards, each
-    /// node keeping its own denominator. Merging first and dividing once gives a smaller answer:
-    /// on `tl_cpu_h2d[83]` that was 336.9 against OpenROAD's 484.9.
+    /// 🔑 The pin's own metal is metal: two stubs that both reach it are one physical conductor,
+    /// however the wire was cut. Keeping them apart made the answer depend on which was seen
+    /// first — raised as OpenROAD issue #11082, fixed in PR #11125, and now what this does.
+    ///
+    /// ⚠️ The two pieces are 40x10 each, so the merged region collects **800**, not 400. That is
+    /// the whole numerical consequence of the change, and it is the reason a correlation baseline
+    /// taken before the fix does not carry over.
     #[test]
-    fn a_terminal_on_two_conductors_belongs_to_both_without_merging_them() {
+    fn a_terminal_on_two_conductors_merges_them_into_one_region() {
         let pin = bx(5, 40, 60, true);
         let g = NetGraph::build(&[bx(5, 0, 100, true)], &[pin]);
         assert_eq!(g.conductors.len(), 2, "the pin cut it in two");
@@ -517,11 +629,25 @@ mod tests {
         assert_eq!(touched.len(), 2, "abuts both pieces");
 
         let regions = g.regions_at(5, &[touched]);
-        assert_eq!(regions.len(), 2, "two conductors, two records — not one merged");
-        for (terms, c) in &regions {
-            assert_eq!(terms, &vec![0], "the terminal is on both");
-            assert_eq!(c.layer_area, 400, "each keeps its own 40x10");
-        }
+        assert_eq!(regions.len(), 1, "bridged by the terminal, so one region");
+        let (terms, c) = &regions[0];
+        assert_eq!(terms, &vec![0], "counted once, not once per piece");
+        assert_eq!(c.layer_area, 800, "both pieces, 40x10 each");
+    }
+
+    /// Two terminals that do NOT share a conductor stay in separate regions.
+    ///
+    /// The merge is transitive through shared terminals only — it does not pool a layer.
+    #[test]
+    fn terminals_on_unconnected_metal_are_not_merged() {
+        let left = bx(5, 0, 40, true);
+        let right = bx(5, 60, 100, true);
+        let g = NetGraph::build(&[left, right], &[]);
+        assert_eq!(g.conductors.len(), 2, "two separate wires");
+        let a = g.touched_by(&[bx(5, 5, 10, true)]);
+        let b = g.touched_by(&[bx(5, 90, 95, true)]);
+        let regions = g.regions_at(5, &[a, b]);
+        assert_eq!(regions.len(), 2, "nothing bridges them");
     }
 
     /// **The case that defeated every earlier model.** Two terminals on a wire cut between them
@@ -571,7 +697,11 @@ mod tests {
             &[bx(1, 0, 10, true), bx(3, 0, 20, true), bx(5, 0, 30, true)],
             &[],
         );
-        assert_eq!(g.conductors.len(), 3, "one conductor per layer, none touching");
+        assert_eq!(
+            g.conductors.len(),
+            3,
+            "one conductor per layer, none touching"
+        );
 
         let t1 = g.touched_by(&[bx(1, 1, 2, true)]);
         let t3 = g.touched_by(&[bx(3, 1, 2, true)]);
