@@ -79,7 +79,7 @@ reference's own answer moves between OpenROAD builds. Both are named:
 | --- | --- |
 | reference | `check_antennas` at OpenROAD `945a9f4` |
 | engine | `vyges-ant` `802e66b` |
-| database | a **detail-routed** sky130 block, 10,918 nets — 9,677 checked, 751 with no gate, 490 unrouted |
+| database | a **detail-routed** sky130 block, 10918 nets — 9677 checked, 751 with no gate, 490 unrouted |
 
 | | violations | matched | missed | added | values within 2% |
 | --- | ---: | ---: | ---: | ---: | ---: |
