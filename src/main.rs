@@ -16,6 +16,7 @@ USAGE:
   vyges loom ant explain <design.odb> --net NAME
   vyges loom ant --describe
   vyges loom ant --help
+  vyges loom ant --version
 
 OPTIONS:
   --net NAME            (explain) dump one net's per-gate, per-stage attribution
@@ -155,6 +156,18 @@ fn explain(args: &[String]) -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // 🔑 **The commit, not just the version.** A version alone cannot tell you which build a bug
+    // report came from — two binaries can share a version and differ by a fix. build.rs bakes the
+    // git SHA in, preferring GITHUB_SHA on CI so a release is never stamped -dirty by the
+    // untracked files a release run leaves behind.
+    //
+    // ⚠️ Before --describe and --help, and before any argument is interpreted: asking a binary what
+    // it is must never depend on the rest of the command line being valid.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("vyges-ant {} ({})", vyges_ant::VERSION, env!("VYGES_GIT_SHA"));
+        println!("{}", vyges_ant::COPYRIGHT);
+        return ExitCode::SUCCESS;
+    }
     if args.iter().any(|a| a == "--describe") {
         print!("{}", describe());
         return ExitCode::SUCCESS;

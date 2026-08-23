@@ -89,6 +89,12 @@
 //! has no routed metal, and reporting that as "this technology states no antenna rule" sends the
 //! reader to the PDK instead of to the detail-routing step.
 
+/// This crate's version, as Cargo knows it — the single number the whole suite is released on.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The copyright line `--version` prints.
+pub const COPYRIGHT: &str = "© 2026 Vyges. All Rights Reserved.  https://vyges.com";
+
 pub mod graph;
 
 use graph::NetGraph;
