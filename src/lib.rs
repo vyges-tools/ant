@@ -80,9 +80,14 @@
 //!
 //! # When a verdict is not a verdict
 //!
-//! Two situations are deliberately not reported as clean, because nothing was checked: a
-//! technology stating no antenna limit in *either* form ([`Report::no_rules_found`]), and a net
-//! with no gate area ([`Report::nets_no_gate`]) — with no denominator there is no ratio.
+//! Three situations are deliberately not reported as clean, because nothing was checked: a
+//! technology stating no antenna limit in *either* form ([`Report::no_rules_found`]), a database
+//! carrying no routed metal at all ([`Report::no_routing_found`]), and a net with no gate area
+//! ([`Report::nets_no_gate`]) — with no denominator there is no ratio.
+//!
+//! ⚠️ The first two are easy to confuse and the distinction matters: a **global-route** database
+//! has no routed metal, and reporting that as "this technology states no antenna rule" sends the
+//! reader to the PDK instead of to the detail-routing step.
 
 pub mod graph;
 
@@ -206,7 +211,17 @@ pub struct Report {
     pub layers_without_rules: Vec<String>,
     /// True when no layer in the design carried a usable antenna rule — the verdict is then
     /// vacuous and must not be read as "clean".
+    ///
+    /// ⚠️ **Only ever true when at least one layer was actually inspected.** It is cleared inside
+    /// the per-net loop, so a database with no routing at all would otherwise leave it standing
+    /// and report "this technology states no antenna rule" about a technology whose rules were
+    /// never read. That case is [`Report::no_routing_found`] instead.
     pub no_rules_found: bool,
+    /// True when no net carried any routed metal, so no layer's rules were ever consulted. Also
+    /// vacuous, and for a different reason than [`Report::no_rules_found`] — the two must not be
+    /// collapsed, because the fix differs: one is a technology without antenna limits, the other
+    /// is very often a GLOBAL-route database handed to a checker that reads routed geometry.
+    pub no_routing_found: bool,
     /// Gates that could not be anchored to the routing (unplaced pin, or a pin sitting over no
     /// metal). Each is a gate that went unchecked, so this is reported rather than dropped —
     /// silently skipping one looks exactly like passing it.
@@ -691,6 +706,23 @@ pub fn check_net(
 }
 
 /// Check every net in the design.
+/// Which vacuous verdict, if either, a pass ended in.
+///
+/// 🔑 **A claim about the TECHNOLOGY can only be made if some layer was actually looked at.**
+/// `no_rules_found` is cleared inside the per-net loop, so a database with no routing leaves it
+/// standing and the engine reports "this technology states no antenna rule" about rules it never
+/// read. Measured on a global-route `.odb` of 10918 nets: every net read as unrouted, no layer's
+/// rules were consulted, and the message sent the reader to the PDK instead of to the
+/// detail-routing step.
+///
+/// Returns `(no_rules_found, no_routing_found)`. They are mutually exclusive by construction.
+pub fn settle_vacuity(saw_region: bool, any_limit_seen: bool) -> (bool, bool) {
+    if !saw_region {
+        return (false, true);
+    }
+    (!any_limit_seen, false)
+}
+
 pub fn check_design(db: &Db) -> Report {
     let dbu = db.dbu_per_micron() as f64;
     let mut r = Report {
@@ -701,6 +733,7 @@ pub fn check_design(db: &Db) -> Report {
         nets_unrouted: 0,
         layers_without_rules: Vec::new(),
         no_rules_found: true,
+        no_routing_found: false,
         gates_unanchored: 0,
         violations: Vec::new(),
     };
@@ -714,6 +747,9 @@ pub fn check_design(db: &Db) -> Report {
     // Rules are per layer, not per net — read them once. Doing it inside the net loop would
     // re-cross the FFI boundary for every net on every layer, for an answer that cannot change.
     let mut rules: std::collections::BTreeMap<String, LayerRules> = Default::default();
+    // Whether any net produced any conductor at all. Without this, "no rules" and "no routing"
+    // are indistinguishable in the result, and the message names the wrong one.
+    let mut saw_region = false;
 
     for net in db.net_names() {
         let Some(na) = read_net(db, &net, dbu) else {
@@ -722,6 +758,7 @@ pub fn check_design(db: &Db) -> Report {
         };
         r.gates_unanchored += na.gates_unanchored;
         for rg in &na.regions {
+            saw_region = true;
             let entry = rules
                 .entry(rg.layer.clone())
                 .or_insert_with(|| read_layer_rules(db, &rg.layer));
@@ -738,6 +775,10 @@ pub fn check_design(db: &Db) -> Report {
         r.nets_checked += 1;
         check_net(&na, &rules, &mut r.violations);
     }
+
+    let (no_rules, no_routing) = settle_vacuity(saw_region, !r.no_rules_found);
+    r.no_rules_found = no_rules;
+    r.no_routing_found = no_routing;
 
     r.layers_without_rules.sort();
     r.count = r.violations.len();

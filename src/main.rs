@@ -207,8 +207,19 @@ fn main() -> ExitCode {
         None => println!("{json}"),
     }
 
-    // A vacuous pass is not a pass. If the technology carried no antenna rule at all there was
-    // nothing to check, and reporting "clean" would be an assertion we never made.
+    // A vacuous pass is not a pass. If nothing was checked, reporting "clean" would be an
+    // assertion we never made. ⚠️ The two vacuous cases need DIFFERENT messages: one sends the
+    // reader to the technology, the other to the routing step, and naming the wrong one costs an
+    // afternoon.
+    if report.no_routing_found {
+        eprintln!(
+            "vyges-ant: no net in this database carries routed metal, so nothing was checked — \
+             the verdict is vacuous, not clean.\n\
+             If this is a GLOBAL-route database, re-run on the detail-routed one: routing guides \
+             are not routing, and this engine reads routed geometry."
+        );
+        return ExitCode::from(2);
+    }
     if report.no_rules_found {
         eprintln!(
             "vyges-ant: no layer in this technology states an antenna rule — \

@@ -8,7 +8,9 @@
 //! The graph walk that *produces* these inputs is tested separately in `src/graph.rs`.
 
 use std::collections::BTreeMap;
-use vyges_ant::{check_net, LayerRules, NetAntenna, Pwl, Ratio, RegionExposure, Violation};
+use vyges_ant::{
+    check_net, settle_vacuity, LayerRules, NetAntenna, Pwl, Ratio, RegionExposure, Violation,
+};
 
 /// One conductor at one stage: the gates on it (summed area) and the metal they share.
 #[allow(clippy::too_many_arguments)]
@@ -692,4 +694,37 @@ fn each_conductor_divides_by_its_own_gate_area() {
         v.iter().all(|x| x.pin != "other/A"),
         "other/A sees only 5.0"
     );
+}
+
+/// A verdict of "nothing was checked" has two causes and they send the reader to different places.
+///
+/// 🔑 The engine reads ROUTED geometry. Handed a global-route database it finds no conductor on
+/// any net, so no layer's rules are ever consulted — and reporting that as "this technology states
+/// no antenna rule" blames the PDK for a database chosen one step too early. Measured: a
+/// global-route `.odb` of 10918 nets returned every net unrouted under exactly that message.
+#[test]
+fn no_routing_is_not_the_same_vacuous_verdict_as_no_rules() {
+    // Nothing routed: the technology's rules were never read, so say nothing about them.
+    assert_eq!(settle_vacuity(false, false), (false, true));
+    // Still nothing routed, even if a limit had somehow been seen — routing decides this one.
+    assert_eq!(settle_vacuity(false, true), (false, true));
+    // Routed, and some layer stated a limit: neither vacuous state applies.
+    assert_eq!(settle_vacuity(true, true), (false, false));
+    // Routed, but no layer in the design states any limit: that IS a claim about the technology.
+    assert_eq!(settle_vacuity(true, false), (true, false));
+}
+
+/// The two flags must never both be set: a caller reporting on one and not the other would
+/// otherwise print two contradictory explanations for the same run.
+#[test]
+fn the_two_vacuous_verdicts_are_mutually_exclusive() {
+    for saw_region in [false, true] {
+        for any_limit in [false, true] {
+            let (no_rules, no_routing) = settle_vacuity(saw_region, any_limit);
+            assert!(
+                !(no_rules && no_routing),
+                "both set for saw_region={saw_region} any_limit={any_limit}"
+            );
+        }
+    }
 }
