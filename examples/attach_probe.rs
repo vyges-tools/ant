@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Which conductors does each terminal attach to, and on what layers?
 //! Run: `cargo run --release --example attach_probe -- <odb> <net>`
-use vyges_opendb::{Db, LayerBox};
 use vyges_ant::graph::NetGraph;
+use vyges_opendb::{Db, LayerBox};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -19,8 +19,15 @@ fn main() {
                 it.clone(),
                 db.iterm_pin_boxes(i, p)
                     .into_iter()
-                    .map(|w| LayerBox { layer: w.layer, x0: w.x0, y0: w.y0, x1: w.x1, y1: w.y1,
-                                        is_routing: true, from_via: false })
+                    .map(|w| LayerBox {
+                        layer: w.layer,
+                        x0: w.x0,
+                        y0: w.y0,
+                        x1: w.x1,
+                        y1: w.y1,
+                        is_routing: true,
+                        from_via: false,
+                    })
                     .collect(),
             ))
         })
@@ -29,7 +36,10 @@ fn main() {
     let g = NetGraph::build(&boxes, &pins);
 
     for (name, pb) in &terms {
-        let pl: Vec<String> = pb.iter().map(|b| db.layer_name_by_number(b.layer)).collect();
+        let pl: Vec<String> = pb
+            .iter()
+            .map(|b| db.layer_name_by_number(b.layer))
+            .collect();
         let hits = g.touched_by(pb);
         let desc: Vec<String> = hits
             .iter()

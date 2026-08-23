@@ -85,8 +85,12 @@ fn main() {
 
     // Everything that exists by this stage — cut layers included, since a via's cut is how a
     // conductor reaches the layer above.
-    let live: Vec<(usize, LayerBox)> =
-        boxes.iter().copied().enumerate().filter(|(_, b)| b.layer <= stage).collect();
+    let live: Vec<(usize, LayerBox)> = boxes
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, b)| b.layer <= stage)
+        .collect();
     println!("net {net}, stage {stage_name}: {} boxes live", live.len());
 
     // Conductors: same-layer contact, plus contact across ONE layer step. The odb layer stack is
@@ -113,7 +117,10 @@ fn main() {
             })
         })
         .collect();
-    println!("boxes wholly inside a pin (would be cut away): {}", covered_by_pin.iter().filter(|&&c| c).count());
+    println!(
+        "boxes wholly inside a pin (would be cut away): {}",
+        covered_by_pin.iter().filter(|&&c| c).count()
+    );
 
     // Attach each terminal to the conductors its own boxes touch, and short them.
     let mut per_root: BTreeMap<u32, (f64, f64, Vec<String>)> = BTreeMap::new();
@@ -136,7 +143,13 @@ fn main() {
             e.1 += t.diff;
             e.2.push(t.name.clone());
         }
-        println!("  {:44} gate={:.4} diff={:.4} touches {} boxes", t.name, t.gate, t.diff, hits.len());
+        println!(
+            "  {:44} gate={:.4} diff={:.4} touches {} boxes",
+            t.name,
+            t.gate,
+            t.diff,
+            hits.len()
+        );
     }
 
     // Per conductor: metal on the stage layer only (the PSR numerator).

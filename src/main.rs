@@ -136,7 +136,11 @@ fn main() -> ExitCode {
     }
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{USAGE}");
-        return if args.is_empty() { ExitCode::from(2) } else { ExitCode::SUCCESS };
+        return if args.is_empty() {
+            ExitCode::from(2)
+        } else {
+            ExitCode::SUCCESS
+        };
     }
     if args[0] == "explain" {
         return explain(&args[1..]);
@@ -241,7 +245,8 @@ mod describe_tests {
     /// where whoever edits the descriptor is standing.
     #[test]
     fn the_descriptor_matches_the_schema_contract() {
-        let d: serde_json::Value = serde_json::from_str(DESCRIBE).expect("descriptor is valid JSON");
+        let d: serde_json::Value =
+            serde_json::from_str(DESCRIBE).expect("descriptor is valid JSON");
 
         assert_eq!(d["schema"], "vyges-tool-descriptor/1.1");
 
@@ -273,7 +278,10 @@ mod describe_tests {
         let limits = d["provenance_limitations"]
             .as_array()
             .expect("provenance_limitations is an array");
-        assert!(!limits.is_empty(), "the schema requires provenance_limitations");
+        assert!(
+            !limits.is_empty(),
+            "the schema requires provenance_limitations"
+        );
     }
 
     /// The descriptor's correlation figures must also appear in the README.
@@ -301,7 +309,11 @@ mod describe_tests {
             .split(|c: char| !c.is_ascii_digit() && c != '.')
             .filter(|s| s.len() > 1 && s.chars().next().is_some_and(|c| c.is_ascii_digit()))
             .collect();
-        let missing: Vec<&str> = nums.iter().copied().filter(|n| !readme.contains(n)).collect();
+        let missing: Vec<&str> = nums
+            .iter()
+            .copied()
+            .filter(|n| !readme.contains(n))
+            .collect();
         assert!(
             missing.is_empty(),
             "the descriptor states figures the README does not: {missing:?}\n\
