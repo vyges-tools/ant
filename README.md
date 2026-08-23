@@ -69,24 +69,33 @@ A plain-ratios-only checker sees no limits there at all.
 
 ## Maturity — measured, not claimed
 
-Correlated against OpenROAD `check_antennas` on a routed sky130 block (~2500 nets, the same
-`.odb`). **Re-measured 2026-08-07 on a deterministic build and against a freshly regenerated
-oracle**, which changed the result — see below.
+Correlated against OpenROAD `check_antennas`, **re-measured 2026-08-23** against a freshly
+generated reference on a build carrying OpenROAD PR #11125.
 
-| against | violations | matched | missed | added | values within 2% |
+⚠️ **A number here means nothing without the build and the database that produced it** — the
+reference's own answer moves between OpenROAD builds. Both are named:
+
+| | |
+| --- | --- |
+| reference | `check_antennas` at OpenROAD `945a9f4` |
+| engine | `vyges-ant` `802e66b` |
+| database | a **detail-routed** sky130 block, 10,918 nets — 9,677 checked, 751 with no gate, 490 unrouted |
+
+| | violations | matched | missed | added | values within 2% |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `check_antennas` **as run on the design, 2026-05-26** | 83 | **82** | 1 | **0** | 80 of 82 |
-| `check_antennas` **re-run today, current build** | 76 | 72 | 4 | 10 | 71 of 72 |
+| `check_antennas` @ `945a9f4` | 44 | **43** | 1 | **0** | **43 of 43** |
 
-**The two OpenROAD runs disagree with each other**, on the same `.odb`: 83 violations then, 76
-now — 73 in common, 10 that only the older build reports, 3 that only the current one does. So
-"which answer is correct" is not settled, and this engine cannot be more correct than the
-reference it is compared against.
+Both sides are deterministic: three engine runs and two reference runs on the same `.odb` return
+byte-identical output, so these are measurements rather than one draw each.
 
-Read the two rows together: **every one of the 10 violations this engine reports that the current
-build does not is a violation the older build did report.** Three of its four misses are the three
-the current build newly added. Net of the reference's own movement, the standing difference is a
-single missed violation.
+**One missed violation, and no false positives.** An earlier measurement (2026-08-07, against a
+build predating #11125) showed 10 violations this engine reported that the reference did not, and
+argued they were inherited from a stale reference rather than generated here. Against a current
+reference there are none.
+
+⚠️ **Give it a detail-routed database.** On a global-route `.odb` OpenROAD synthesises wires from
+the routing guides; this engine reads the routed database, finds no routing, and refuses the
+verdict as vacuous rather than reporting clean. The two are not checking the same thing there.
 
 **Treat this as a strong screen, not a sign-off gate.** Run `check_antennas` for sign-off, and if
 the two disagree, check which build you are comparing against before assuming either is wrong.
@@ -95,10 +104,9 @@ The engine is deterministic — the same `.odb` returns a byte-identical violati
 
 ### What is still divergent
 
-**A small number of values.** Some metal is attributed slightly differently on those nets.
-Diagnosed far enough to know it is attribution, not arithmetic — the limits match exactly and
-the large majority of values are identical (80 of 82 against the 2026-05-26 reference, 71 of 72
-against today's).
+**A single missed violation**, on `met3` PSR, where the reference measures 5192.82 against a limit
+of 2773.88 and this engine reports nothing. Every matched value agrees within 2% — 43 of 43 — so
+the standing difference is one violation found, not a spread of values.
 
 **Cut layers are not evaluated.** OpenROAD checks `mcon`/`via`/`via2` against their own ratios
 (`calculateViaPar`); this engine builds cut-layer geometry, because connectivity needs it, but
@@ -152,7 +160,7 @@ by one violation. The union is correct and stays; it simply was not the problem.
 
 And one gap that is the technology's rather than the tool's: a ratio stated in *neither* LEF form
 is not checked. On sky130 that means PAR, CAR and CSR are unlimited and only PSR is evaluated —
-which the golden report confirms, every one of its 83 violations being PSR.
+which the reference confirms, all 44 of its violations being PSR (`Side area`).
 
 ## Verdicts that are not verdicts
 
