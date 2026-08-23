@@ -4,7 +4,7 @@ Antenna ratio sign-off over the **routed** design database. Reads a `.odb`, comp
 PSR / CSR per net per routing layer against the limits the LEF states, and emits a verdict.
 
 ```sh
-vyges-ant check routed.odb          # 0 clean · 1 violations · 2 error
+vyges-ant check routed.odb          # 0 clean · 1 violations · 2 vacuous or error
 vyges-ant check routed.odb -o antenna.json
 vyges-ant --describe                # machine-readable contract
 ```
@@ -164,13 +164,22 @@ which the reference confirms, all 44 of its violations being PSR (`Side area`).
 
 ## Verdicts that are not verdicts
 
-Two cases are deliberately **not** reported as clean, because nothing was actually checked:
+Three cases are deliberately **not** reported as clean, because nothing was actually checked. The
+first two set `"status": "vacuous"` and exit 2:
 
-- **No antenna rules in the technology** — exit 2, not 0. A design whose LEF states no antenna
+- **No antenna rules in the technology** (`no_rules_found`) — a design whose LEF states no antenna
   limits has not passed anything.
+- **No routed metal in the database** (`no_routing_found`) — usually a **global-route** `.odb`
+  handed to a checker that reads routed geometry. OpenROAD synthesises wires from the routing
+  guides there; this engine does not, so it finds nothing and says so rather than reporting clean.
 - **A net with no gate area** — counted in `nets_no_gate`, not passed. With no denominator there
   is no ratio. A large count here means the library's antenna models are missing and the check is
   covering less than it appears to, which is why the number is in the report rather than swallowed.
+
+🔑 **`vacuous` is not `clean`, and that distinction is the point of the status field.** A run that
+consulted no rule found no violation, so a two-valued status would report it as a pass — and the
+descriptor's declared assertion (`status == "clean"`) would pass with it. That is the one way an
+unverified design could be signed off by a machine, so vacuity outranks the violation count.
 
 ## Report
 
@@ -184,6 +193,7 @@ Two cases are deliberately **not** reported as clean, because nothing was actual
   "gates_unanchored": 0,
   "layers_without_rules": [],
   "no_rules_found": false,
+  "no_routing_found": false,
   "violations": []
 }
 ```

@@ -26,6 +26,8 @@ OPTIONS:
 EXIT STATUS:
   0  clean          no violation found
   1  violations     at least one net exceeds a LEF antenna limit
+  2  vacuous        nothing was checked -- no antenna rule in the technology, or no routed
+                    metal in the database (a global-route .odb has none). NOT a pass.
   2  error          usage error, unreadable database, or no DBU scale
 ";
 
@@ -38,6 +40,7 @@ const DESCRIBE: &str = r#"{
       "input_hash covers the argument vector, not the content of the .odb it names.",
       "Both the plain and the diffusion-dependent (PWL) LEF ratio forms are read; where a technology states a diff curve it takes precedence, and outside the curve's stated range the limit is clamped rather than extrapolated.",
       "A ratio the technology states in neither form is not checked. On sky130 only DiffPSR is stated, so PAR, CAR and CSR are unlimited there; layers_without_rules and no_rules_found report this rather than leaving it implied by the exit code.",
+      "status is one of clean, violations, vacuous or error. VACUOUS IS NOT CLEAN: it means nothing was checked, either because no layer states an antenna rule (no_rules_found) or because no net carries routed metal (no_routing_found, which usually means a global-route database was passed to a checker that reads routed geometry). The declared assertion passes only on clean, so a vacuous run fails it rather than signing off a design nothing was verified on. Exit status is 2 for both vacuous and error, 1 for violations, 0 for clean.",
       "Correlated against OpenROAD check_antennas, RE-MEASURED 2026-08-23 against a freshly generated reference on a build carrying OpenROAD PR 11125. Reference: check_antennas at OpenROAD 945a9f4. Engine: vyges-ant 802e66b. Database: a detail-routed sky130 block of 10918 nets, of which 9677 checked, 751 with no gate, 490 unrouted. Result: 44 reference violations, 43 matched, 1 missed, 0 added, 43 of 43 matched values within 2%. All 44 are PSR. Both sides are deterministic -- repeat runs on the same .odb return byte-identical output. A NUMBER HERE MEANS NOTHING WITHOUT THE BUILD AND THE DATABASE: the reference's own answer moves between OpenROAD builds, and an earlier measurement against a pre-11125 build showed 10 violations this engine reported that the reference did not, all of which are gone against a current reference. Treat as a strong screen, not a sign-off gate: run check_antennas for sign-off, and if the two disagree check which build you are comparing against. Give it a DETAIL-routed database -- on a global-route .odb the reference synthesises wires from routing guides while this engine reads the routed database, finds no routing, and refuses the verdict as vacuous.",
       "The ratio is charged per CONDUCTOR: metal reachable from the gates over layers at or below the one being deposited, divided by the summed gate area of the gates on that conductor. Measured as the exact union of the rectangles, so overlap and abutment count once.",
       "The diffusion-dependent limit is indexed by each conductor's own diffusion, matching OpenROAD's per-node iterm_diff_area. Every terminal is anchored to a conductor, not only the gates, since a diode pin carries diffusion without carrying a gate.",
@@ -284,7 +287,9 @@ mod describe_tests {
         assert_eq!(d["assertion"]["field"], "status");
         assert_eq!(
             pw["eq"], "clean",
-            "Report::status is \"clean\" or \"violations\" (see lib.rs)"
+            "Report::status is \"clean\", \"violations\", \"vacuous\" or \"error\" (see \
+             lib.rs). It must be asserted against \"clean\" ALONE: \"vacuous\" is a run that \
+             checked nothing, and admitting it here would let an unverified design pass the gate."
         );
         let limits = d["provenance_limitations"]
             .as_array()

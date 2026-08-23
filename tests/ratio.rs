@@ -9,7 +9,8 @@
 
 use std::collections::BTreeMap;
 use vyges_ant::{
-    check_net, settle_vacuity, LayerRules, NetAntenna, Pwl, Ratio, RegionExposure, Violation,
+    check_net, settle_status, settle_vacuity, LayerRules, NetAntenna, Pwl, Ratio,
+    RegionExposure, Violation,
 };
 
 /// One conductor at one stage: the gates on it (summed area) and the metal they share.
@@ -727,4 +728,28 @@ fn the_two_vacuous_verdicts_are_mutually_exclusive() {
             );
         }
     }
+}
+
+/// A run that checked nothing must not report the same word as a run that found nothing wrong.
+///
+/// 🔑 The descriptor's declared assertion is `status == "clean"`, so this is the one place an
+/// unverified design could be signed off by a machine: no rules consulted, no violations found,
+/// verdict "clean". Vacuity therefore outranks the count.
+#[test]
+fn a_vacuous_run_does_not_report_the_same_status_as_a_clean_one() {
+    assert_eq!(settle_status(false, false, 0), "clean");
+    assert_eq!(settle_status(false, false, 3), "violations");
+    // No layer stated a limit — nothing was compared, so this is not a pass.
+    assert_eq!(settle_status(true, false, 0), "vacuous");
+    // No net carried routed metal — same verdict, different cause; the flags tell them apart.
+    assert_eq!(settle_status(false, true, 0), "vacuous");
+}
+
+/// Vacuity outranks the violation count, so a stray count cannot turn an unchecked run into a
+/// reported one. The two cannot co-occur today, which is exactly why the ordering needs pinning:
+/// nothing else would catch it being reversed.
+#[test]
+fn vacuity_outranks_the_violation_count() {
+    assert_eq!(settle_status(true, false, 7), "vacuous");
+    assert_eq!(settle_status(false, true, 7), "vacuous");
 }

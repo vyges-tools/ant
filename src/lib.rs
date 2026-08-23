@@ -194,7 +194,13 @@ pub struct NetAntenna {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
-    /// `clean` when no violation was found, `violations` otherwise.
+    /// `clean`, `violations`, `vacuous` or `error`.
+    ///
+    /// 🔑 **`vacuous` is NOT `clean`, and the difference is the whole point of the field.** A run
+    /// that checked nothing found no violation, so a two-valued status would report it as a pass —
+    /// and the declared assertion (`status == clean`) would pass with it, which is the one way an
+    /// unchecked design can be signed off by a machine. `vacuous` covers both
+    /// [`Report::no_rules_found`] and [`Report::no_routing_found`]; the flags say which.
     pub status: &'static str,
     pub count: usize,
     /// Nets that had both routed metal and a gate — the ones actually evaluated.
@@ -723,6 +729,26 @@ pub fn settle_vacuity(saw_region: bool, any_limit_seen: bool) -> (bool, bool) {
     (!any_limit_seen, false)
 }
 
+/// The verdict word, from the two vacuous flags and the violation count.
+///
+/// ⚠️ **Vacuity outranks the count.** A run that consulted no rule and a run that found nothing
+/// wrong both end with `count == 0`, and only this ordering keeps them apart. Reporting the first
+/// as `clean` is how an unchecked design passes a gate keyed on `status`.
+///
+/// ℹ️ Vacuity always implies `count == 0` — with no limit there is nothing to exceed — so the
+/// branches cannot disagree. The order is stated anyway, because that implication is a property of
+/// today's checks rather than something the type system holds to.
+pub fn settle_status(no_rules: bool, no_routing: bool, count: usize) -> &'static str {
+    if no_rules || no_routing {
+        return "vacuous";
+    }
+    if count == 0 {
+        "clean"
+    } else {
+        "violations"
+    }
+}
+
 pub fn check_design(db: &Db) -> Report {
     let dbu = db.dbu_per_micron() as f64;
     let mut r = Report {
@@ -782,6 +808,6 @@ pub fn check_design(db: &Db) -> Report {
 
     r.layers_without_rules.sort();
     r.count = r.violations.len();
-    r.status = if r.count == 0 { "clean" } else { "violations" };
+    r.status = settle_status(r.no_rules_found, r.no_routing_found, r.count);
     r
 }
