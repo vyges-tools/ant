@@ -31,8 +31,30 @@ EXIT STATUS:
   2  error          usage error, unreadable database, or no DBU scale
 ";
 
+
+/// The pin, inherited from the crate every engine already depends on.
+const CRATE_PIN: &str = vyges_opendb::OPENROAD_PIN;
+
+/// The pin this binary was built against, injected into the descriptor at print time.
+///
+/// 🔑 **One definition for the whole programme, inherited rather than typed.** The SHA lives in
+/// `openroad-pin.yaml` in `vyges-opendb-lib` and reaches here through `vyges-opendb`, which this
+/// engine already depends on. Before this, every engine spelled the pin out in its own
+/// `--describe` prose, and four of them were still quoting the previous one a day after it moved.
+///
+/// ⚠️ **It reports what this BINARY was built against — not that the binary is current.** A stale
+/// build reports its stale pin quite happily. That is the point: a harness compares this against
+/// the oracle image it is about to launch and refuses on a mismatch, which is the check that was
+/// missing when two engines ran a whole gate against the previous pin's oracle.
+const PIN_TOKEN: &str = "@OPENROAD_PIN@";
+
+fn describe() -> String {
+    DESCRIBE.replace(PIN_TOKEN, CRATE_PIN)
+}
+
 const DESCRIBE: &str = r#"{
   "schema": "vyges-tool-descriptor/1.1",
+  "openroad_pin": "@OPENROAD_PIN@",
   "name": "ant",
   "summary": "antenna ratio sign-off (PAR/CAR/PSR/CSR) over the routed design database",
   "maturity": "structured",
@@ -134,7 +156,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--describe") {
-        print!("{DESCRIBE}");
+        print!("{}", describe());
         return ExitCode::SUCCESS;
     }
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
@@ -335,5 +357,38 @@ mod describe_tests {
             "the descriptor states figures the README does not: {missing:?}\n\
              one of the two is stale, and the descriptor is the one that travels"
         );
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::{describe, PIN_TOKEN};
+
+    #[test]
+    fn the_descriptor_reports_the_pin_this_binary_was_built_against() {
+        let d = describe();
+        assert!(
+            !d.contains(PIN_TOKEN),
+            "the pin placeholder survived into the output -- the substitution did not run"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&d).expect("the descriptor is still valid JSON once filled in");
+        assert_eq!(
+            v["openroad_pin"], super::CRATE_PIN,
+            "the descriptor must report the pin this binary was actually built against"
+        );
+        assert_eq!(super::CRATE_PIN.len(), 40, "a full commit SHA, not an abbreviation");
+    }
+
+    /// ⛔ The whole point of inheriting the pin is that no engine carries one of its own.
+    #[test]
+    fn no_sha_is_hardcoded_anywhere_in_the_descriptor() {
+        let raw = super::DESCRIBE;
+        for tok in raw.split(|c: char| !c.is_ascii_hexdigit()) {
+            assert!(
+                tok.len() < 40,
+                "{tok} looks like a hardcoded commit -- use the {PIN_TOKEN} placeholder"
+            );
+        }
     }
 }
