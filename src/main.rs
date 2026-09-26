@@ -155,6 +155,9 @@ fn explain(args: &[String]) -> ExitCode {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // ⛔ Before any database exists: libodb then logs to the events trail (stderr) only, and
+    // stdout carries nothing but the report a caller parses.
+    vyges_opendb::init_events_logging();
 
     // 🔑 **The commit, not just the version.** A version alone cannot tell you which build a bug
     // report came from — two binaries can share a version and differ by a fix. build.rs bakes the
