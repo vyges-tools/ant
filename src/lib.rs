@@ -318,9 +318,13 @@ pub fn read_net(db: &Db, net: &str, dbu: f64) -> Option<NetAntenna> {
     let mut kept: Vec<&Term> = Vec::new();
     let mut gates_unanchored = 0usize;
     for t in &terms {
-        if t.gate <= 0.0 && t.diff <= 0.0 {
-            continue; // contributes to neither side of the ratio
-        }
+        // ⛔ **EVERY terminal is attached, gate or not.** Its pin cut the metal it sits on, and the
+        // reference unites the pieces a pin touches for every instance terminal on the net
+        // (`saveGates` over `getITerms()`, `calculateAreas` merging "nodes sharing an iterm ...
+        // whatever the pin's direction"). A terminal with no gate and no diffusion adds nothing
+        // to either side of the ratio, but skipping it left its cut OPEN: a macro output pin
+        // with neither severed a diode from the 1.4 mm of met3 beyond it, and a 5192 / 2774
+        // side-area violation went unreported.
         let touched = graph.touched_by(&t.boxes);
         if touched.is_empty() {
             // Only a lost GATE means a gate went unchecked; lost diffusion is a missing relief,

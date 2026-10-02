@@ -637,6 +637,22 @@ mod tests {
 
     /// Two terminals that do NOT share a conductor stay in separate regions.
     ///
+    /// Rule (`saveGates` / `calculateAreas`): the pieces a pin cut are one conductor again
+    /// through that pin, whatever the terminal is — passing the terminal re-joins them, so a
+    /// gate on one side is exposed to the metal on the other.
+    #[test]
+    fn a_pin_bridges_the_pieces_it_cut() {
+        let g = NetGraph::build(&[bx(5, 0, 100, true)], &[bx(5, 40, 60, true)]);
+        let gate = g.touched_by(&[bx(5, 5, 10, true)]);
+        let pin = g.touched_by(&[bx(5, 40, 60, true)]);
+        assert_eq!(pin.len(), 2, "the pin touches both pieces it cut");
+        let open = g.regions_at(5, std::slice::from_ref(&gate));
+        assert_eq!(open[0].1.layer_area, 400, "without the pin's terminal: its own piece only");
+        let bridged = g.regions_at(5, &[gate, pin]);
+        assert_eq!(bridged.len(), 1, "one conductor through the pin");
+        assert_eq!(bridged[0].1.layer_area, 800, "both pieces");
+    }
+
     /// The merge is transitive through shared terminals only — it does not pool a layer.
     #[test]
     fn terminals_on_unconnected_metal_are_not_merged() {
