@@ -4,6 +4,7 @@
 //! Exit status is the verdict: 0 clean, 1 violations, 2 usage/read error. A caller can gate on
 //! the exit code without parsing prose, which is the contract every Loom engine keeps.
 
+use vyges_events::Severity;
 use std::process::ExitCode;
 use vyges_ant::check_design;
 use vyges_opendb::Db;
@@ -132,13 +133,13 @@ fn explain(args: &[String]) -> ExitCode {
     let db = match Db::open(odb_path) {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("vyges-ant: cannot read {odb_path}: {e}");
+            event(Severity::Error, "ANT-READ", format!("cannot read {odb_path}: {e}"));
             return ExitCode::from(2);
         }
     };
     let dbu = db.dbu_per_micron() as f64;
     if dbu <= 0.0 {
-        eprintln!("vyges-ant: no DBU scale");
+        event(Severity::Error, "ANT-NO-DBU", "no DBU scale".into());
         return ExitCode::from(2);
     }
     match vyges_ant::read_net(&db, net, dbu) {
@@ -147,10 +148,15 @@ fn explain(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         None => {
-            eprintln!("vyges-ant: {net} has no routed metal (or does not exist)");
+            event(Severity::Error, "ANT-NET-UNROUTED", format!("{net} has no routed metal (or does not exist)"));
             ExitCode::from(2)
         }
     }
+}
+
+/// One message as a structured event (`vyges-events/1.0`, the human log rendered from it).
+fn event(severity: Severity, code: &str, msg: String) {
+    vyges_events::emit(&vyges_events::Event::new("vyges-ant", severity, msg).with_code(code));
 }
 
 fn main() -> ExitCode {
@@ -224,16 +230,24 @@ fn main() -> ExitCode {
     let db = match Db::open(odb_path) {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("vyges-ant: cannot read {odb_path}: {e}");
+            event(Severity::Error, "ANT-READ", format!("cannot read {odb_path}: {e}"));
             return ExitCode::from(2);
         }
     };
 
     let report = check_design(&db);
+    // The reference's result lines, as `check_antennas` prints them: nets, then pins (a gate pin
+    // counts once whatever layers it violates on).
+    if !(report.no_routing_found || report.no_rules_found || report.status == "error") {
+        let nets: std::collections::BTreeSet<&str> = report.violations.iter().map(|v| v.net.as_str()).collect();
+        let pins: std::collections::BTreeSet<(&str, &str)> = report.violations.iter().map(|v| (v.net.as_str(), v.pin.as_str())).collect();
+        event(Severity::Info, "ANT-0002", format!("Found {} net violations.", nets.len()));
+        event(Severity::Info, "ANT-0001", format!("Found {} pin violations.", pins.len()));
+    }
     let json = match serde_json::to_string_pretty(&report) {
         Ok(j) => j,
         Err(e) => {
-            eprintln!("vyges-ant: cannot serialize report: {e}");
+            event(Severity::Error, "ANT-REPORT", format!("cannot serialize report: {e}"));
             return ExitCode::from(2);
         }
     };
@@ -241,7 +255,7 @@ fn main() -> ExitCode {
     match out_path {
         Some(p) => {
             if let Err(e) = std::fs::write(p, format!("{json}\n")) {
-                eprintln!("vyges-ant: cannot write {p}: {e}");
+                event(Severity::Error, "ANT-WRITE", format!("cannot write {p}: {e}"));
                 return ExitCode::from(2);
             }
         }
@@ -253,19 +267,19 @@ fn main() -> ExitCode {
     // reader to the technology, the other to the routing step, and naming the wrong one costs an
     // afternoon.
     if report.no_routing_found {
-        eprintln!(
-            "vyges-ant: no net in this database carries routed metal, so nothing was checked — \
-             the verdict is vacuous, not clean.\n\
-             If this is a GLOBAL-route database, re-run on the detail-routed one: routing guides \
-             are not routing, and this engine reads routed geometry."
+        event(Severity::Error, "ANT-0008", "No detailed or global routing found. Run global_route or detailed_route first.".into());
+        event(
+            Severity::Error,
+            "ANT-VACUOUS-NO-ROUTING",
+            "no net in this database carries routed metal, so nothing was checked — the verdict is vacuous, not clean. \
+             If this is a GLOBAL-route database, re-run on the detail-routed one: routing guides are not routing, \
+             and this engine reads routed geometry."
+                .into(),
         );
         return ExitCode::from(2);
     }
     if report.no_rules_found {
-        eprintln!(
-            "vyges-ant: no layer in this technology states an antenna rule — \
-             the verdict is vacuous, not clean"
-        );
+        event(Severity::Error, "ANT-VACUOUS-NO-RULES", "no layer in this technology states an antenna rule — the verdict is vacuous, not clean".into());
         return ExitCode::from(2);
     }
     if report.status == "error" {

@@ -13,6 +13,8 @@ repository = "https://github.com/vyges-tools/ant"
 # rules all come from here. Reading a GDS instead would be a different check at a different
 # stage — see vyges-drc, which does exactly that, post-stream.
 vyges-opendb = { git = "https://github.com/vyges-tools/opendb.git", branch = "main" }
+# One structured event per message (`vyges-events/1.0`), the reference's ANT lines included.
+vyges-events = { git = "https://github.com/vyges-tools/events.git", branch = "main", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
