@@ -239,6 +239,7 @@ impl NetGraph {
         // every downstream grouping. Rust's HashMap is randomly seeded per process, so with a
         // HashMap here the same database produced a different answer on each run. See the note on
         // `by_root` in `regions_at` for what that cost.
+        #[allow(clippy::type_complexity)]
         let mut by_layer: BTreeMap<i64, (Vec<(i32, i32, i32, i32)>, bool)> = BTreeMap::new();
         for b in boxes {
             let e = by_layer
@@ -433,7 +434,7 @@ fn label_components(g: &Grid) -> Vec<Vec<usize>> {
         while let Some(k) = stack.pop() {
             comp.push(k);
             let (i, j) = (k / g.ny, k % g.ny);
-            let mut visit = |i: usize, j: usize, stack: &mut Vec<usize>, seen: &mut Vec<bool>| {
+            let visit = |i: usize, j: usize, stack: &mut Vec<usize>, seen: &mut Vec<bool>| {
                 let n = i * g.ny + j;
                 if g.covered[n] && !seen[n] {
                     seen[n] = true;
@@ -574,7 +575,7 @@ mod tests {
             "the li1 enclosure is there to be touched"
         );
 
-        let regions = g.regions_at(5, &[touched.clone()]);
+        let regions = g.regions_at(5, std::slice::from_ref(&touched));
         assert_eq!(regions.len(), 1);
         assert_eq!(
             regions[0].1.cumulative_area,
