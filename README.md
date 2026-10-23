@@ -28,7 +28,7 @@ violate CAR, because the charge a gate sees is what the whole connected stack co
 ## Why the routed database, and not a GDS
 
 `vyges-drc` already computes an antenna ratio — over GDS polygons, post-stream. This engine
-computes it over `dbWire` routing, which is where OpenROAD's `ant` computes it and, more to the
+computes it over `dbWire` routing, which is where the reference checker computes it and, more to the
 point, the stage at which a violation can still be repaired by inserting a diode. A GDS answer
 arrives after the last chance to act on it.
 
@@ -69,15 +69,15 @@ A plain-ratios-only checker sees no limits there at all.
 
 ## Maturity — measured, not claimed
 
-Correlated against OpenROAD `check_antennas`, **re-measured 2026-08-23** against a freshly
-generated reference on a build carrying OpenROAD PR #11125.
+Correlated against the reference `check_antennas`, **re-measured 2026-08-23** against a freshly
+generated reference on a build carrying a later reference fix.
 
 ⚠️ **A number here means nothing without the build and the database that produced it** — the
-reference's own answer moves between OpenROAD builds. Both are named:
+reference's own answer moves between reference builds. Both are named:
 
 | | |
 | --- | --- |
-| reference | `check_antennas` at OpenROAD `945a9f4` |
+| reference | `check_antennas` at reference commit `945a9f4` |
 | engine | `vyges-ant` `802e66b` |
 | database | a **detail-routed** sky130 block, 10918 nets — 9677 checked, 751 with no gate, 490 unrouted |
 
@@ -93,7 +93,7 @@ build predating #11125) showed 10 violations this engine reported that the refer
 argued they were inherited from a stale reference rather than generated here. Against a current
 reference there are none.
 
-⚠️ **Give it a detail-routed database.** On a global-route `.odb` OpenROAD synthesises wires from
+⚠️ **Give it a detail-routed database.** On a global-route `.odb` the reference synthesises wires from
 the routing guides; this engine reads the routed database, finds no routing, and refuses the
 verdict as vacuous rather than reporting clean. The two are not checking the same thing there.
 
@@ -108,23 +108,22 @@ The engine is deterministic — the same `.odb` returns a byte-identical violati
 of 2773.88 and this engine reports nothing. Every matched value agrees within 2% — 43 of 43 — so
 the standing difference is one violation found, not a spread of values.
 
-**Cut layers are not evaluated.** OpenROAD checks `mcon`/`via`/`via2` against their own ratios
-(`calculateViaPar`); this engine builds cut-layer geometry, because connectivity needs it, but
+**Cut layers are not evaluated.** The reference checks `mcon`/`via`/`via2` against their own ratios;
+this engine builds cut-layer geometry, because connectivity needs it, but
 only evaluates routing layers. No violation in the golden report is on a cut layer.
 
-**CAR/CSR composition.** OpenROAD keeps separate cumulative chains for wires and vias. Not
+**CAR/CSR composition.** The reference keeps separate cumulative chains for wires and vias. Not
 exercised by sky130, which states no cumulative limit.
 
-### One OpenROAD behaviour reproduced deliberately
+### One reference behaviour reproduced deliberately
 
-When a gate belongs to several conductors on one layer, OpenROAD sums their ratios but **not**
-their diffusion areas — `NodeInfo::operator+=` accumulates six fields and leaves
-`iterm_gate_area` and `iterm_diff_area` behind — so the PWL limit is indexed by whichever
+When a gate belongs to several conductors on one layer, the reference sums their ratios but **not**
+their diffusion areas — its per-node accumulation adds six fields and leaves the gate and
+diffusion areas behind — so the PWL limit is indexed by whichever
 conductor was recorded first. This engine reproduces that, because a checker that disagrees with
 the incumbent is not usable as a cross-check.
 
-Whether it is intended is an open question upstream:
-**[OpenROAD #11082](https://github.com/The-OpenROAD-Project/OpenROAD/issues/11082)**. If it turns
+Whether it is intended is an open question; it is a reported reference behaviour. If it turns
 out to be deliberate this note becomes the documentation; if not, this engine follows the fix.
 
 ### How the model was arrived at
@@ -136,8 +135,8 @@ Worth stating because two plausible models were wrong first:
 2. **Charge each gate its own area.** Over-reported by the gate count instead: exactly 2.00× on
    two-gate regions, which is what gave the model away.
 3. **Charge each conductor, denominator summed over the gates on it.** Confirmed by reading
-   `AntennaChecker.cc`, and checked numerically first: region metal of 1603.33 µm² over its
-   three gates (0.4347 + 0.4347 + 0.126 = 0.9954) gives 1610.7 against OpenROAD's 1611.2.
+   the reference source, and checked numerically first: region metal of 1603.33 µm² over its
+   three gates (0.4347 + 0.4347 + 0.126 = 0.9954) gives 1610.7 against the reference's 1611.2.
 4. **Index the limit by each conductor's own diffusion, not the net's total.** A net-wide total
    is never smaller, so the bar sat too high and real violations slipped under. Fixing it took
    exact matches from 37 to 65 and removed *every* limit disagreement.
@@ -170,7 +169,7 @@ first two set `"status": "vacuous"` and exit 2:
 - **No antenna rules in the technology** (`no_rules_found`) — a design whose LEF states no antenna
   limits has not passed anything.
 - **No routed metal in the database** (`no_routing_found`) — usually a **global-route** `.odb`
-  handed to a checker that reads routed geometry. OpenROAD synthesises wires from the routing
+  handed to a checker that reads routed geometry. The reference synthesises wires from the routing
   guides there; this engine does not, so it finds nothing and says so rather than reporting clean.
 - **A net with no gate area** — counted in `nets_no_gate`, not passed. With no denominator there
   is no ratio. A large count here means the library's antenna models are missing and the check is
