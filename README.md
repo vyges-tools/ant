@@ -89,7 +89,7 @@ Both sides are deterministic: three engine runs and two reference runs on the sa
 byte-identical output, so these are measurements rather than one draw each.
 
 **One missed violation, and no false positives.** An earlier measurement (2026-08-07, against a
-build predating #11125) showed 10 violations this engine reported that the reference did not, and
+build predating that fix) showed 10 violations this engine reported that the reference did not, and
 argued they were inherited from a stale reference rather than generated here. Against a current
 reference there are none.
 
