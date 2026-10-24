@@ -155,8 +155,31 @@ fn explain(args: &[String]) -> ExitCode {
 }
 
 /// One message as a structured event (`vyges-events/1.0`, the human log rendered from it).
+/// One message. A reference code (`ANT-nnnn`) is written as the reference writes it,
+/// `[INFO ANT-0002] text`, through the suite logger (which also emits the event); our own codes
+/// stay plain events.
 fn event(severity: Severity, code: &str, msg: String) {
-    vyges_events::emit(&vyges_events::Event::new("vyges-ant", severity, msg).with_code(code));
+    use std::sync::{Mutex, OnceLock};
+    static LOG: OnceLock<Mutex<vyges_events::logger::Logger>> = OnceLock::new();
+    let Some((tool, id)) = vyges_events::logger::parse_code(code) else {
+        vyges_events::emit(&vyges_events::Event::new("vyges-ant", severity, msg).with_code(code));
+        return;
+    };
+    let mut log = LOG
+        .get_or_init(|| Mutex::new(vyges_events::logger::Logger::new().events("vyges-ant")))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match severity {
+        Severity::Info => log.info(tool, id, msg),
+        Severity::Warn => log.warn(tool, id, msg),
+        _ => {
+            // The run's exit status carries the stop; this only writes the line.
+            let _ = log.error::<()>(tool, id, msg);
+        }
+    }
+    for l in log.take_lines() {
+        eprintln!("{l}");
+    }
 }
 
 fn main() -> ExitCode {
@@ -420,5 +443,24 @@ mod pin_tests {
                 "{tok} looks like a hardcoded commit -- use the {PIN_TOKEN} placeholder"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod event_route_tests {
+    /// Rule: a reference code (`ANT-nnnn`) is written in the reference's own line format; our
+    /// codes (`ANT-READ`, `ANT-NET-UNROUTED`, …) stay events, so they can never be mistaken for a
+    /// reference line by a log comparison.
+    #[test]
+    fn only_reference_codes_take_the_reference_line_format() {
+        use vyges_events::logger::parse_code;
+        assert_eq!(parse_code("ANT-0002"), Some(("ANT", 2)));
+        assert_eq!(parse_code("ANT-0008"), Some(("ANT", 8)));
+        for ours in ["ANT-READ", "ANT-NO-DBU", "ANT-NET-UNROUTED", "ANT-VACUOUS-NO-RULES"] {
+            assert_eq!(parse_code(ours), None, "{ours}");
+        }
+        let mut log = vyges_events::logger::Logger::new();
+        log.info("ANT", 2, "Found 3 net violations.");
+        assert_eq!(log.lines(), ["[INFO ANT-0002] Found 3 net violations."]);
     }
 }
