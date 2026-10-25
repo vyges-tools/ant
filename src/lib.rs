@@ -89,6 +89,10 @@
 //! has no routed metal, and reporting that as "this technology states no antenna rule" sends the
 //! reader to the PDK instead of to the detail-routing step.
 
+// The crate's own name inside it: the command-line entry ([`cli_main`]) is built into the
+// library too, and its `vyges_ant::…` paths resolve here.
+extern crate self as vyges_ant;
+
 /// This crate's version, as Cargo knows it — the single number the whole suite is released on.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -821,3 +825,10 @@ pub fn check_design(db: &Db) -> Report {
     r.status = settle_status(r.no_rules_found, r.no_routing_found, r.count);
     r
 }
+
+/// The `vyges-ant` command-line entry (the binary's `main`), built into the library too so a
+/// suite binary can link every engine and run the one it is invoked as.
+#[cfg(feature = "suite")]
+#[doc(hidden)]
+#[path = "main.rs"]
+pub mod cli_main;
