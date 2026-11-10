@@ -1,5 +1,7 @@
 # vyges-ant
 
+**[Download Loom](https://vyges.com/products/vyges-cli/#install)** · install the free [Vyges CLI](https://vyges.com/products/vyges-cli/), then `vyges install loom`
+
 Antenna ratio sign-off over the **routed** design database. Reads a `.odb`, computes PAR / CAR /
 PSR / CSR per net per routing layer against the limits the LEF states, and emits a verdict.
 
